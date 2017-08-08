@@ -31,11 +31,13 @@ import (
 	"k8s.io/kops/nodeup/pkg/model"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
+	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/pkg/apis/nodeup"
+	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/cloudinit"
 	"k8s.io/kops/upup/pkg/fi/nodeup/local"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
-	"k8s.io/kops/upup/pkg/fi/nodeup/tags"
 	"k8s.io/kops/upup/pkg/fi/utils"
 	"k8s.io/kops/util/pkg/vfs"
 )
@@ -44,7 +46,7 @@ import (
 const MaxTaskDuration = 365 * 24 * time.Hour
 
 type NodeUpCommand struct {
-	config         *NodeUpConfig
+	config         *nodeup.Config
 	cluster        *api.Cluster
 	instanceGroup  *api.InstanceGroup
 	ConfigLocation string
@@ -76,9 +78,9 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	if c.CacheDir == "" {
 		return fmt.Errorf("CacheDir is required")
 	}
-	assets := fi.NewAssetStore(c.CacheDir)
+	assetStore := fi.NewAssetStore(c.CacheDir)
 	for _, asset := range c.config.Assets {
-		err := assets.Add(asset)
+		err := assetStore.Add(asset)
 		if err != nil {
 			return fmt.Errorf("error adding asset %q: %v", asset, err)
 		}
@@ -194,28 +196,48 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 		return fmt.Errorf("error initializing: %v", err)
 	}
 
+	k8sVersion, err := util.ParseKubernetesVersion(c.cluster.Spec.KubernetesVersion)
+	if err != nil || k8sVersion == nil {
+		return fmt.Errorf("unable to parse KubernetesVersion %q", c.cluster.Spec.KubernetesVersion)
+	}
+
 	modelContext := &model.NodeupModelContext{
+		NodeupConfig:  c.config,
 		Cluster:       c.cluster,
 		Distribution:  distribution,
 		Architecture:  model.ArchitectureAmd64,
 		InstanceGroup: c.instanceGroup,
 		IsMaster:      nodeTags.Has(TagMaster),
-		UsesCNI:       nodeTags.Has(tags.TagCNI),
-		Assets:        assets,
+		Assets:        assetStore,
 		KeyStore:      tf.keyStore,
 		SecretStore:   tf.secretStore,
+
+		KubernetesVersion: *k8sVersion,
 	}
 
-	loader := NewLoader(c.config, c.cluster, assets, nodeTags)
+	loader := NewLoader(c.config, c.cluster, assetStore, nodeTags)
+	loader.Builders = append(loader.Builders, &model.DirectoryBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.DockerBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.ProtokubeBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.CloudConfigBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubeletBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubectlBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.EtcdBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.LogrotateBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.PackagesBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.SecretBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.FirewallBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.NetworkBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.SysctlBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubeAPIServerBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubeControllerManagerBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.KubeSchedulerBuilder{NodeupModelContext: modelContext})
+	if c.cluster.Spec.Networking.Kuberouter == nil {
+		loader.Builders = append(loader.Builders, &model.KubeProxyBuilder{NodeupModelContext: modelContext})
+	} else {
+		loader.Builders = append(loader.Builders, &model.KubeRouterBuilder{NodeupModelContext: modelContext})
+	}
+	loader.Builders = append(loader.Builders, &model.HookBuilder{NodeupModelContext: modelContext})
 
 	tf.populate(loader.TemplateFunctions)
 
@@ -250,7 +272,8 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 			Tags:     nodeTags,
 		}
 	case "dryrun":
-		target = fi.NewDryRunTarget(out)
+		assetBuilder := assets.NewAssetBuilder()
+		target = fi.NewDryRunTarget(assetBuilder, out)
 	case "cloudinit":
 		checkExisting = false
 		target = cloudinit.NewCloudInitTarget(out, nodeTags)
@@ -290,6 +313,13 @@ func evaluateSpec(c *api.Cluster) error {
 		return err
 	}
 
+	if c.Spec.KubeProxy != nil {
+		c.Spec.KubeProxy.HostnameOverride, err = evaluateHostnameOverride(c.Spec.KubeProxy.HostnameOverride)
+		if err != nil {
+			return err
+		}
+	}
+
 	if c.Spec.Docker != nil {
 		err = evaluateDockerSpecStorage(c.Spec.Docker)
 		if err != nil {
@@ -316,13 +346,20 @@ func evaluateHostnameOverride(hostnameOverride string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error reading local hostname from AWS metadata: %v", err)
 	}
-	v := strings.TrimSpace(string(vBytes))
-	if v == "" {
+
+	// The local-hostname gets it's hostname from the AWS DHCP Option Set, which
+	// may provide multiple hostnames separated by spaces. For now just choose
+	// the first one as the hostname.
+	domains := strings.Fields(string(vBytes))
+	if len(domains) == 0 {
 		glog.Warningf("Local hostname from AWS metadata service was empty")
+		return "", nil
 	} else {
-		glog.Infof("Using hostname from AWS metadata service: %s", v)
+		domain := domains[0]
+		glog.Infof("Using hostname from AWS metadata service: %s", domain)
+
+		return domain, nil
 	}
-	return v, nil
 }
 
 // evaluateDockerSpec selects the first supported storage mode, if it is a list

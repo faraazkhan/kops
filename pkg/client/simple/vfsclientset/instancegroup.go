@@ -17,11 +17,17 @@ limitations under the License.
 package vfsclientset
 
 import (
+	"fmt"
 	"github.com/golang/glog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/kops/pkg/apis/kops"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/v1alpha1"
-	"k8s.io/kops/pkg/client/simple"
+	"k8s.io/kops/pkg/apis/kops/validation"
+	kopsinternalversion "k8s.io/kops/pkg/client/clientset_generated/clientset/typed/kops/internalversion"
 )
 
 type InstanceGroupVFS struct {
@@ -43,12 +49,19 @@ func newInstanceGroupVFS(c *VFSClientset, clusterName string) *InstanceGroupVFS 
 	r.init(kind, c.basePath.Join(clusterName, "instancegroup"), StoreVersion)
 	defaultReadVersion := v1alpha1.SchemeGroupVersion.WithKind(kind)
 	r.defaultReadVersion = &defaultReadVersion
+	r.validate = func(o runtime.Object) error {
+		return validation.ValidateInstanceGroup(o.(*kops.InstanceGroup))
+	}
 	return r
 }
 
-var _ simple.InstanceGroupInterface = &InstanceGroupVFS{}
+var _ kopsinternalversion.InstanceGroupInterface = &InstanceGroupVFS{}
 
-func (c *InstanceGroupVFS) Get(name string) (*api.InstanceGroup, error) {
+func (c *InstanceGroupVFS) Get(name string, options metav1.GetOptions) (*api.InstanceGroup, error) {
+	if options.ResourceVersion != "" {
+		return nil, fmt.Errorf("ResourceVersion not supported in InstanceGroupVFS::Get")
+	}
+
 	o, err := c.get(name)
 	if err != nil {
 		return nil, err
@@ -101,4 +114,16 @@ func (c *InstanceGroupVFS) Update(g *api.InstanceGroup) (*api.InstanceGroup, err
 
 func (c *InstanceGroupVFS) Delete(name string, options *metav1.DeleteOptions) error {
 	return c.delete(name, options)
+}
+
+func (r *InstanceGroupVFS) DeleteCollection(options *metav1.DeleteOptions, listOptions metav1.ListOptions) error {
+	return fmt.Errorf("InstanceGroupVFS DeleteCollection not implemented for vfs store")
+}
+
+func (r *InstanceGroupVFS) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+	return nil, fmt.Errorf("InstanceGroupVFS Watch not implemented for vfs store")
+}
+
+func (r *InstanceGroupVFS) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *api.InstanceGroup, err error) {
+	return nil, fmt.Errorf("InstanceGroupVFS Patch not implemented for vfs store")
 }

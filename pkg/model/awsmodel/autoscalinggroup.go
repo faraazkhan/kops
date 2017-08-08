@@ -26,8 +26,11 @@ import (
 )
 
 const (
-	DefaultVolumeSize = 20
-	DefaultVolumeType = "gp2"
+	DefaultVolumeSizeNode    = 128
+	DefaultVolumeSizeMaster  = 64
+	DefaultVolumeSizeBastion = 32
+	DefaultVolumeType        = "gp2"
+	DefaultVolumeIops        = 100
 )
 
 // AutoscalingGroupModelBuilder configures AutoscalingGroup objects
@@ -35,6 +38,7 @@ type AutoscalingGroupModelBuilder struct {
 	*AWSModelContext
 
 	BootstrapScript *model.BootstrapScript
+	Lifecycle       *fi.Lifecycle
 }
 
 var _ fi.ModelBuilder = &AutoscalingGroupModelBuilder{}
@@ -48,15 +52,32 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		{
 			volumeSize := fi.Int32Value(ig.Spec.RootVolumeSize)
 			if volumeSize == 0 {
-				volumeSize = DefaultVolumeSize
+				switch ig.Spec.Role {
+				case kops.InstanceGroupRoleMaster:
+					volumeSize = DefaultVolumeSizeMaster
+				case kops.InstanceGroupRoleNode:
+					volumeSize = DefaultVolumeSizeNode
+				case kops.InstanceGroupRoleBastion:
+					volumeSize = DefaultVolumeSizeBastion
+				default:
+					return fmt.Errorf("this case should not get hit, kops.Role not found %s", ig.Spec.Role)
+				}
 			}
 			volumeType := fi.StringValue(ig.Spec.RootVolumeType)
-			if volumeType == "" {
+			volumeIops := fi.Int32Value(ig.Spec.RootVolumeIops)
+
+			switch volumeType {
+			case "io1":
+				if volumeIops == 0 {
+					volumeIops = DefaultVolumeIops
+				}
+			default:
 				volumeType = DefaultVolumeType
 			}
 
 			t := &awstasks.LaunchConfiguration{
-				Name: s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
 
 				SecurityGroups: []*awstasks.SecurityGroup{
 					b.LinkToSecurityGroup(ig.Spec.Role),
@@ -65,8 +86,17 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 				ImageID:            s(ig.Spec.Image),
 				InstanceType:       s(ig.Spec.MachineType),
 
-				RootVolumeSize: i64(int64(volumeSize)),
-				RootVolumeType: s(volumeType),
+				RootVolumeSize:         i64(int64(volumeSize)),
+				RootVolumeType:         s(volumeType),
+				RootVolumeOptimization: ig.Spec.RootVolumeOptimization,
+			}
+
+			if volumeType == "io1" {
+				t.RootVolumeIops = i64(int64(volumeIops))
+			}
+
+			if ig.Spec.Tenancy != "" {
+				t.Tenancy = s(ig.Spec.Tenancy)
 			}
 
 			for _, id := range ig.Spec.AdditionalSecurityGroups {
@@ -87,7 +117,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 				return err
 			}
 
-			if t.UserData, err = b.BootstrapScript.ResourceNodeUp(ig); err != nil {
+			if t.UserData, err = b.BootstrapScript.ResourceNodeUp(ig, b.Cluster.Spec.EgressProxy); err != nil {
 				return err
 			}
 
@@ -147,7 +177,8 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// AutoscalingGroup
 		{
 			t := &awstasks.AutoscalingGroup{
-				Name: s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
 
 				LaunchConfiguration: launchConfiguration,
 			}

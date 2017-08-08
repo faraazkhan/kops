@@ -18,25 +18,29 @@ package protokube
 
 import (
 	"fmt"
+	"sync"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"sync"
 )
 
+// KubernetesContext is the kubernetes context
 type KubernetesContext struct {
-	mutex  sync.Mutex
-	client kubernetes.Interface
+	mutex     sync.Mutex
+	k8sClient kubernetes.Interface
 }
 
+// NewKubernetesContext returns a new KubernetesContext
 func NewKubernetesContext() *KubernetesContext {
 	return &KubernetesContext{}
 }
 
+// KubernetesClient returns a new kubernetes api client
 func (c *KubernetesContext) KubernetesClient() (kubernetes.Interface, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if c.client == nil {
+	if c.k8sClient == nil {
 		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 		loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
 
@@ -54,7 +58,8 @@ func (c *KubernetesContext) KubernetesClient() (kubernetes.Interface, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot build kube client: %v", err)
 		}
-		c.client = k8sClient
+		c.k8sClient = k8sClient
 	}
-	return c.client, nil
+
+	return c.k8sClient, nil
 }

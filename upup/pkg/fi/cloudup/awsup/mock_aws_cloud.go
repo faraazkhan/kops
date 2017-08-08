@@ -19,7 +19,7 @@ package awsup
 import (
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/route53/route53iface"
 	"github.com/golang/glog"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider"
 	dnsproviderroute53 "k8s.io/kubernetes/federation/pkg/dnsprovider/providers/aws/route53"
@@ -66,12 +67,13 @@ func BuildMockAWSCloud(region string, zoneLetters string) *MockAWSCloud {
 }
 
 type MockCloud struct {
+	MockAutoscaling    autoscalingiface.AutoScalingAPI
 	MockCloudFormation *cloudformation.CloudFormation
 	MockEC2            ec2iface.EC2API
 	MockRoute53        route53iface.Route53API
 }
 
-func (c *MockCloud) ProviderID() fi.CloudProviderID {
+func (c *MockCloud) ProviderID() kops.CloudProviderID {
 	return "mock"
 }
 
@@ -175,9 +177,11 @@ func (c *MockAWSCloud) ELB() *elb.ELB {
 	return nil
 }
 
-func (c *MockAWSCloud) Autoscaling() *autoscaling.AutoScaling {
-	glog.Fatalf("MockAWSCloud Autoscaling not implemented")
-	return nil
+func (c *MockAWSCloud) Autoscaling() autoscalingiface.AutoScalingAPI {
+	if c.MockAutoscaling == nil {
+		glog.Fatalf("MockAWSCloud Autoscaling not implemented")
+	}
+	return c.MockAutoscaling
 }
 
 func (c *MockAWSCloud) Route53() route53iface.Route53API {
@@ -189,4 +193,18 @@ func (c *MockAWSCloud) Route53() route53iface.Route53API {
 
 func (c *MockAWSCloud) FindVPCInfo(id string) (*fi.VPCInfo, error) {
 	return nil, fmt.Errorf("MockAWSCloud FindVPCInfo not implemented")
+}
+
+// DefaultInstanceType determines an instance type for the specified cluster & instance group
+func (c *MockAWSCloud) DefaultInstanceType(cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error) {
+	switch ig.Spec.Role {
+	case kops.InstanceGroupRoleMaster:
+		return "m3.medium", nil
+	case kops.InstanceGroupRoleNode:
+		return "t2.medium", nil
+	case kops.InstanceGroupRoleBastion:
+		return "t2.micro", nil
+	default:
+		return "", fmt.Errorf("MockAWSCloud DefaultInstanceType does not handle %s", ig.Spec.Role)
+	}
 }

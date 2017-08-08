@@ -27,11 +27,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"github.com/golang/glog"
 	"io"
-	"k8s.io/kops/util/pkg/vfs"
 	"math/big"
 	"time"
+
+	"k8s.io/kops/util/pkg/vfs"
+
+	"github.com/golang/glog"
 )
 
 const CertificateId_CA = "ca"
@@ -103,10 +105,20 @@ type Keystore interface {
 	// (if the certificate is found but not keypair, that is not an error: only the cert will be returned)
 	FindKeypair(name string) (*Certificate, *PrivateKey, error)
 
-	CreateKeypair(name string, template *x509.Certificate) (*Certificate, *PrivateKey, error)
+	CreateKeypair(name string, template *x509.Certificate, privateKey *PrivateKey) (*Certificate, error)
 
 	// Store the keypair
 	StoreKeypair(id string, cert *Certificate, privateKey *PrivateKey) error
+}
+
+func GeneratePrivateKey() (*PrivateKey, error) {
+	rsaKey, err := rsa.GenerateKey(crypto_rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("error generating RSA private key: %v", err)
+	}
+
+	privateKey := &PrivateKey{Key: rsaKey}
+	return privateKey, nil
 }
 
 type CAStore interface {

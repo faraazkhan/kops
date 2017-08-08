@@ -18,18 +18,20 @@ package validation
 
 import (
 	"fmt"
+	"net"
+	"strings"
+
 	"github.com/blang/semver"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/upup/pkg/fi"
-	"net"
-	"strings"
 )
 
 // legacy contains validation functions that don't match the apimachinery style
 
+// ValidateCluster is responsible for checking the validatity of the Cluster spec
 func ValidateCluster(c *kops.Cluster, strict bool) error {
 	specField := field.NewPath("Spec")
 
@@ -272,9 +274,11 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 		kubeProxyPath := specPath.Child("KubeProxy")
 
 		master := c.Spec.KubeProxy.Master
-		if strict && master == "" {
-			return field.Required(kubeProxyPath.Child("Master"), "")
-		}
+		// We no longer require the master to be set; nodeup can infer it automatically
+		//if strict && master == "" {
+		//      return field.Required(kubeProxyPath.Child("Master"), "")
+		//}
+
 		if master != "" && !isValidAPIServersURL(master) {
 			return field.Invalid(kubeProxyPath.Child("Master"), master, "Not a valid APIServer URL")
 		}
@@ -369,6 +373,7 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 		if len(c.Spec.EtcdClusters) == 0 {
 			return field.Required(specField.Child("EtcdClusters"), "")
 		}
+		var usingTLS int
 		for _, etcd := range c.Spec.EtcdClusters {
 			if etcd.Name == "" {
 				return fmt.Errorf("EtcdCluster did not have name")
@@ -380,6 +385,9 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 				// Not technically a requirement, but doesn't really make sense to allow
 				return fmt.Errorf("There should be an odd number of master-zones, for etcd's quorum.  Hint: Use --zones and --master-zones to declare node zones and master zones separately.")
 			}
+			if etcd.EnableEtcdTLS {
+				usingTLS++
+			}
 			for _, m := range etcd.Members {
 				if m.Name == "" {
 					return fmt.Errorf("EtcdMember did not have Name in cluster %q", etcd.Name)
@@ -389,6 +397,10 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 				}
 			}
 		}
+		// check both clusters are using tls if one us enabled
+		if usingTLS > 0 && usingTLS != len(c.Spec.EtcdClusters) {
+			return fmt.Errorf("Both etcd clusters must have TLS enabled or none at all")
+		}
 	}
 
 	if kubernetesRelease.GTE(semver.MustParse("1.4.0")) {
@@ -397,8 +409,7 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 		}
 	}
 
-	errs := newValidateCluster(c)
-	if len(errs) != 0 {
+	if errs := newValidateCluster(c); len(errs) != 0 {
 		return errs[0]
 	}
 
@@ -406,8 +417,7 @@ func ValidateCluster(c *kops.Cluster, strict bool) error {
 }
 
 func DeepValidate(c *kops.Cluster, groups []*kops.InstanceGroup, strict bool) error {
-	err := ValidateCluster(c, strict)
-	if err != nil {
+	if err := ValidateCluster(c, strict); err != nil {
 		return err
 	}
 
@@ -434,9 +444,19 @@ func DeepValidate(c *kops.Cluster, groups []*kops.InstanceGroup, strict bool) er
 	}
 
 	for _, g := range groups {
-		err := g.CrossValidate(c, strict)
+		err := CrossValidateInstanceGroup(g, c, strict)
 		if err != nil {
 			return err
+		}
+
+		// Additional cloud-specific validation rules,
+		// such as making sure that identifiers match the expected formats for the given cloud
+		switch kops.CloudProviderID(c.Spec.CloudProvider) {
+		case kops.CloudProviderAWS:
+			errs := awsValidateInstanceGroup(g)
+			if len(errs) != 0 {
+				return errs[0]
+			}
 		}
 	}
 

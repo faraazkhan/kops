@@ -27,7 +27,9 @@ import (
 
 //go:generate fitask -type=Network
 type Network struct {
-	Name *string
+	Name      *string
+	Lifecycle *fi.Lifecycle
+
 	CIDR *string
 }
 
@@ -61,6 +63,7 @@ func (e *Network) Find(c *fi.Context) (*Network, error) {
 
 func (e *Network) URL(project string) string {
 	u := gce.GoogleCloudURL{
+		Version: "beta",
 		Project: project,
 		Name:    *e.Name,
 		Type:    "networks",

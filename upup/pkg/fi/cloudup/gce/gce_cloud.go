@@ -23,6 +23,7 @@ import (
 	"golang.org/x/oauth2/google"
 	compute "google.golang.org/api/compute/v0.beta"
 	"google.golang.org/api/storage/v1"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider/providers/google/clouddns"
@@ -40,8 +41,8 @@ type GCECloud struct {
 
 var _ fi.Cloud = &GCECloud{}
 
-func (c *GCECloud) ProviderID() fi.CloudProviderID {
-	return fi.CloudProviderGCE
+func (c *GCECloud) ProviderID() kops.CloudProviderID {
+	return kops.CloudProviderGCE
 }
 
 func NewGCECloud(region string, project string, labels map[string]string) (*GCECloud, error) {
@@ -92,14 +93,35 @@ func (c *GCECloud) Labels() map[string]string {
 	return tags
 }
 
-func (c *GCECloud) WaitForZoneOp(op *compute.Operation, zone string) error {
-	return WaitForZoneOp(c.Compute, op, c.Project, zone)
+func (c *GCECloud) WaitForOp(op *compute.Operation) error {
+	return WaitForOp(c.Compute, op)
 }
 
-func (c *GCECloud) WaitForRegionOp(op *compute.Operation) error {
-	return WaitForRegionOp(c.Compute, op, c.Project)
-}
+func (c *GCECloud) GetApiIngressStatus(cluster *kops.Cluster) ([]kops.ApiIngressStatus, error) {
+	var ingresses []kops.ApiIngressStatus
 
-func (c *GCECloud) WaitForGlobalOp(op *compute.Operation) error {
-	return WaitForGlobalOp(c.Compute, op, c.Project)
+	// Note that this must match GCEModelContext::NameForForwardingRule
+	name := SafeObjectName("api", cluster.ObjectMeta.Name)
+
+	glog.V(2).Infof("Querying GCE to find ForwardingRules for API (%q)", name)
+	forwardingRule, err := c.Compute.ForwardingRules.Get(c.Project, c.Region, name).Do()
+	if err != nil {
+		if !IsNotFound(err) {
+			forwardingRule = nil
+		} else {
+			return nil, fmt.Errorf("error getting ForwardingRule %q: %v", name, err)
+		}
+	}
+
+	if forwardingRule != nil {
+		if forwardingRule.IPAddress == "" {
+			return nil, fmt.Errorf("Found forward rule %q, but it did not have an IPAddress", name)
+		}
+
+		ingresses = append(ingresses, kops.ApiIngressStatus{
+			IP: forwardingRule.IPAddress,
+		})
+	}
+
+	return ingresses, nil
 }

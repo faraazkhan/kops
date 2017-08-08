@@ -35,6 +35,7 @@ type AutoscalingGroupModelBuilder struct {
 	*GCEModelContext
 
 	BootstrapScript *model.BootstrapScript
+	Lifecycle       *fi.Lifecycle
 }
 
 var _ fi.ModelBuilder = &AutoscalingGroupModelBuilder{}
@@ -43,7 +44,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	for _, ig := range b.InstanceGroups {
 		name := b.SafeObjectName(ig.ObjectMeta.Name)
 
-		startupScript, err := b.BootstrapScript.ResourceNodeUp(ig)
+		startupScript, err := b.BootstrapScript.ResourceNodeUp(ig, b.Cluster.Spec.EgressProxy)
 		if err != nil {
 			return err
 		}
@@ -62,6 +63,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 
 			t := &gcetasks.InstanceTemplate{
 				Name:           s(name),
+				Lifecycle:      b.Lifecycle,
 				Network:        b.LinkToNetwork(),
 				MachineType:    s(ig.Spec.MachineType),
 				BootDiskType:   s(volumeType),
@@ -92,6 +94,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 				// Grant DNS permissions
 				t.Scopes = append(t.Scopes, "https://www.googleapis.com/auth/ndev.clouddns.readwrite")
 				t.Tags = append(t.Tags, b.GCETagForRole(kops.InstanceGroupRoleMaster))
+
 			case kops.InstanceGroupRoleNode:
 				t.Tags = append(t.Tags, b.GCETagForRole(kops.InstanceGroupRoleNode))
 			}
@@ -157,12 +160,21 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 
 			name := b.SafeObjectName(zone + "." + ig.ObjectMeta.Name)
 
-			t := &gcetasks.ManagedInstanceGroup{
+			t := &gcetasks.InstanceGroupManager{
 				Name:             s(name),
+				Lifecycle:        b.Lifecycle,
 				Zone:             s(zone),
 				TargetSize:       fi.Int64(int64(targetSize)),
 				BaseInstanceName: s(ig.ObjectMeta.Name),
 				InstanceTemplate: instanceTemplate,
+			}
+
+			// Attach masters to load balancer if we're using one
+			switch ig.Spec.Role {
+			case kops.InstanceGroupRoleMaster:
+				if b.UseLoadBalancerForAPI() {
+					t.TargetPools = append(t.TargetPools, b.LinkToTargetPool("api"))
+				}
 			}
 
 			c.AddTask(t)

@@ -52,9 +52,6 @@
 [submodule "_vendor/github.com/google/gofuzz"]
 	path = _vendor/github.com/google/gofuzz
 	url = https://github.com/google/gofuzz
-[submodule "_vendor/github.com/golang/protobuf"]
-	path = _vendor/github.com/golang/protobuf
-	url = https://github.com/golang/protobuf
 [submodule "_vendor/github.com/gogo/protobuf"]
 	path = _vendor/github.com/gogo/protobuf
 	url = https://github.com/gogo/protobuf
@@ -259,3 +256,69 @@
 [submodule "_vendor/github.com/pelletier/go-buffruneio"]
 	path = _vendor/github.com/pelletier/go-buffruneio
 	url = https://github.com/pelletier/go-buffruneio
+[submodule "_vendor/github.com/coreos/etcd"]
+	path = _vendor/github.com/coreos/etcd
+	url = https://github.com/coreos/etcd
+[submodule "_vendor/google.golang.org/grpc"]
+	path = _vendor/google.golang.org/grpc
+	url = https://github.com/grpc/grpc-go.git
+[submodule "_vendor/github.com/elazarl/go-bindata-assetfs"]
+	path = _vendor/github.com/elazarl/go-bindata-assetfs
+	url = https://github.com/elazarl/go-bindata-assetfs
+[submodule "_vendor/gopkg.in/natefinch/lumberjack.v2"]
+	path = _vendor/gopkg.in/natefinch/lumberjack.v2
+	url = https://gopkg.in/natefinch/lumberjack.v2
+[submodule "_vendor/github.com/golang/protobuf"]
+	path = _vendor/github.com/golang/protobuf
+	url = https://github.com/golang/protobuf
+[submodule "_vendor/github.com/vmware/govmomi"]
+	path = _vendor/github.com/vmware/govmomi
+	url = https://github.com/vmware/govmomi.git
+[submodule "_vendor/github.com/coreos/go-semver"]
+	path = _vendor/github.com/coreos/go-semver
+	url = https://github.com/coreos/go-semver.git
+[submodule "_vendor/github.com/miekg/coredns"]
+	path = _vendor/github.com/miekg/coredns
+	url = https://github.com/miekg/coredns.git
+[submodule "_vendor/github.com/miekg/dns"]
+	path = _vendor/github.com/miekg/dns
+	url = https://github.com/miekg/dns.git
+[submodule "_vendor/github.com/weaveworks/mesh"]
+	path = _vendor/github.com/weaveworks/mesh
+	url = https://github.com/weaveworks/mesh
+[submodule "_vendor/github.com/grpc-ecosystem/go-grpc-prometheus"]
+	path = _vendor/github.com/grpc-ecosystem/go-grpc-prometheus
+	url = https://github.com/grpc-ecosystem/go-grpc-prometheus
+[submodule "_vendor/github.com/grpc-ecosystem/grpc-gateway"]
+	path = _vendor/github.com/grpc-ecosystem/grpc-gateway
+	url = https://github.com/grpc-ecosystem/grpc-gateway
+[submodule "_vendor/github.com/emicklei/go-restful-swagger12"]
+	path = _vendor/github.com/emicklei/go-restful-swagger12
+	url = https://github.com/emicklei/go-restful-swagger12
+[submodule "_vendor/github.com/fatih/camelcase"]
+	path = _vendor/github.com/fatih/camelcase
+	url = https://github.com/fatih/camelcase
+[submodule "_vendor/github.com/go-openapi/loads"]
+	path = _vendor/github.com/go-openapi/loads
+	url = https://github.com/go-openapi/loads
+[submodule "_vendor/github.com/go-openapi/analysis"]
+	path = _vendor/github.com/go-openapi/analysis
+	url = https://github.com/go-openapi/analysis
+[submodule "_vendor/github.com/googleapis/gnostic"]
+	path = _vendor/github.com/googleapis/gnostic
+	url = https://github.com/googleapis/gnostic
+[submodule "_vendor/github.com/hashicorp/golang-lru"]
+	path = _vendor/github.com/hashicorp/golang-lru
+	url = https://github.com/hashicorp/golang-lru
+[submodule "_vendor/github.com/Azure/go-autorest"]
+	path = _vendor/github.com/Azure/go-autorest
+	url = https://github.com/Azure/go-autorest
+[submodule "_vendor/github.com/digitalocean/godo"]
+	path = _vendor/github.com/digitalocean/godo
+	url = https://github.com/digitalocean/godo.git
+[submodule "_vendor/github.com/google/go-querystring"]
+	path = _vendor/github.com/google/go-querystring
+	url = https://github.com/google/go-querystring.git
+[submodule "_vendor/github.com/tent/http-link-go"]
+	path = _vendor/github.com/tent/http-link-go
+	url = https://github.com/tent/http-link-go.git

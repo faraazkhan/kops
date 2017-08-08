@@ -17,6 +17,7 @@ limitations under the License.
 package components
 
 import (
+	"github.com/golang/glog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
@@ -57,8 +58,12 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 	clusterSpec.Kubelet.LogLevel = fi.Int32(2)
 	clusterSpec.Kubelet.ClusterDNS = ip.String()
 	clusterSpec.Kubelet.ClusterDomain = clusterSpec.ClusterDNSDomain
-	clusterSpec.Kubelet.BabysitDaemons = fi.Bool(true)
 	clusterSpec.Kubelet.NonMasqueradeCIDR = clusterSpec.NonMasqueradeCIDR
+
+	if b.Context.IsKubernetesLT("1.7") {
+		// babysit-daemons removed in 1.7
+		clusterSpec.Kubelet.BabysitDaemons = fi.Bool(true)
+	}
 
 	clusterSpec.MasterKubelet.RegisterSchedulable = fi.Bool(false)
 	// Replace the CIDR with a CIDR allocated by KCM (the default, but included for clarity)
@@ -127,11 +132,12 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.MasterKubelet.HairpinMode = "none"
 	}
 
-	cloudProvider := fi.CloudProviderID(clusterSpec.CloudProvider)
+	cloudProvider := kops.CloudProviderID(clusterSpec.CloudProvider)
 
 	clusterSpec.Kubelet.CgroupRoot = "/"
 
-	if cloudProvider == fi.CloudProviderAWS {
+	glog.V(1).Infof("Cloud Provider: %s", cloudProvider)
+	if cloudProvider == kops.CloudProviderAWS {
 		clusterSpec.Kubelet.CloudProvider = "aws"
 
 		// For 1.6 we're using much cleaner cgroup hierarchies
@@ -145,7 +151,7 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.Kubelet.HostnameOverride = "@aws"
 	}
 
-	if cloudProvider == fi.CloudProviderGCE {
+	if cloudProvider == kops.CloudProviderGCE {
 		clusterSpec.Kubelet.CloudProvider = "gce"
 		clusterSpec.Kubelet.HairpinMode = "promiscuous-bridge"
 
@@ -154,6 +160,11 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		}
 		clusterSpec.CloudConfig.Multizone = fi.Bool(true)
 		clusterSpec.CloudConfig.NodeTags = fi.String(GCETagForRole(b.Context.ClusterName, kops.InstanceGroupRoleNode))
+	}
+
+	if cloudProvider == kops.CloudProviderVSphere {
+		clusterSpec.Kubelet.CloudProvider = "vsphere"
+		clusterSpec.Kubelet.HairpinMode = "promiscuous-bridge"
 	}
 
 	usesKubenet, err := UsesKubenet(clusterSpec)
@@ -168,6 +179,13 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 			clusterSpec.Kubelet.NetworkPluginMTU = fi.Int32(9001)
 		}
 	}
+
+	// Specify our pause image
+	image := "gcr.io/google_containers/pause-amd64:3.0"
+	if image, err = b.Context.AssetBuilder.RemapImage(image); err != nil {
+		return err
+	}
+	clusterSpec.Kubelet.PodInfraContainerImage = image
 
 	return nil
 }

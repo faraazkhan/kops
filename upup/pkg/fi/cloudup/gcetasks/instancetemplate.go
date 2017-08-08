@@ -18,18 +18,27 @@ package gcetasks
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/golang/glog"
 	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
-	"strings"
 )
 
 // InstanceTemplate represents a GCE InstanceTemplate
 //go:generate fitask -type=InstanceTemplate
 type InstanceTemplate struct {
-	Name    *string
+	// Name will be used for as the name prefix
+	Name      *string
+	Lifecycle *fi.Lifecycle
+
 	Network *Network
 	Tags    []string
 	//Labels      map[string]string
@@ -46,18 +55,21 @@ type InstanceTemplate struct {
 
 	Metadata    map[string]*fi.ResourceHolder
 	MachineType *string
+
+	// ID is the actual name
+	ID *string
 }
 
 var _ fi.CompareWithID = &InstanceTemplate{}
 
 func (e *InstanceTemplate) CompareWithID() *string {
-	return e.Name
+	return e.ID
 }
 
 func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 	cloud := c.Cloud.(*gce.GCECloud)
 
-	r, err := cloud.Compute.InstanceTemplates.Get(cloud.Project, *e.Name).Do()
+	response, err := cloud.Compute.InstanceTemplates.List(cloud.Project).Do()
 	if err != nil {
 		if gce.IsNotFound(err) {
 			return nil, nil
@@ -65,69 +77,94 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		return nil, fmt.Errorf("error listing InstanceTemplates: %v", err)
 	}
 
-	actual := &InstanceTemplate{}
-	actual.Name = &r.Name
-
-	p := r.Properties
-
-	for _, tag := range p.Tags.Items {
-		actual.Tags = append(actual.Tags, tag)
-	}
-	actual.MachineType = fi.String(lastComponent(p.MachineType))
-	actual.CanIPForward = &p.CanIpForward
-
-	bootDiskImage, err := ShortenImageURL(cloud.Project, p.Disks[0].InitializeParams.SourceImage)
+	expected, err := e.mapToGCE(cloud.Project)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing source image URL: %v", err)
-	}
-	actual.BootDiskImage = fi.String(bootDiskImage)
-	actual.BootDiskType = &p.Disks[0].InitializeParams.DiskType
-	actual.BootDiskSizeGB = &p.Disks[0].InitializeParams.DiskSizeGb
-
-	if p.Scheduling != nil {
-		actual.Preemptible = &p.Scheduling.Preemptible
-	}
-	if len(p.NetworkInterfaces) != 0 {
-		ni := p.NetworkInterfaces[0]
-		actual.Network = &Network{Name: fi.String(lastComponent(ni.Network))}
+		return nil, err
 	}
 
-	for _, serviceAccount := range p.ServiceAccounts {
-		for _, scope := range serviceAccount.Scopes {
-			actual.Scopes = append(actual.Scopes, scopeToShortForm(scope))
+	for _, r := range response.Items {
+		if !strings.HasPrefix(r.Name, fi.StringValue(e.Name)) {
+			continue
 		}
-	}
 
-	//for i, disk := range p.Disks {
-	//	if i == 0 {
-	//		source := disk.Source
-	//
-	//		// TODO: Parse source URL instead of assuming same project/zone?
-	//		name := lastComponent(source)
-	//		d, err := cloud.Compute.Disks.Get(cloud.Project, *e.Zone, name).Do()
-	//		if err != nil {
-	//			if gce.IsNotFound(err) {
-	//				return nil, fmt.Errorf("disk not found %q: %v", source, err)
-	//			}
-	//			return nil, fmt.Errorf("error querying for disk %q: %v", source, err)
-	//		} else {
-	//			imageURL, err := gce.ParseGoogleCloudURL(d.SourceImage)
-	//			if err != nil {
-	//				return nil, fmt.Errorf("unable to parse image URL: %q", d.SourceImage)
-	//			}
-	//			actual.Image = fi.String(imageURL.Project + "/" + imageURL.Name)
-	//		}
-	//	}
-	//}
-
-	if p.Metadata != nil {
-		actual.Metadata = make(map[string]*fi.ResourceHolder)
-		for _, meta := range p.Metadata.Items {
-			actual.Metadata[meta.Key] = fi.WrapResource(fi.NewStringResource(meta.Value))
+		if !matches(expected, r) {
+			continue
 		}
+
+		actual := &InstanceTemplate{}
+
+		p := r.Properties
+
+		for _, tag := range p.Tags.Items {
+			actual.Tags = append(actual.Tags, tag)
+		}
+		actual.MachineType = fi.String(lastComponent(p.MachineType))
+		actual.CanIPForward = &p.CanIpForward
+
+		bootDiskImage, err := ShortenImageURL(cloud.Project, p.Disks[0].InitializeParams.SourceImage)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing source image URL: %v", err)
+		}
+		actual.BootDiskImage = fi.String(bootDiskImage)
+		actual.BootDiskType = &p.Disks[0].InitializeParams.DiskType
+		actual.BootDiskSizeGB = &p.Disks[0].InitializeParams.DiskSizeGb
+
+		if p.Scheduling != nil {
+			actual.Preemptible = &p.Scheduling.Preemptible
+		}
+		if len(p.NetworkInterfaces) != 0 {
+			ni := p.NetworkInterfaces[0]
+			actual.Network = &Network{Name: fi.String(lastComponent(ni.Network))}
+		}
+
+		for _, serviceAccount := range p.ServiceAccounts {
+			for _, scope := range serviceAccount.Scopes {
+				actual.Scopes = append(actual.Scopes, scopeToShortForm(scope))
+			}
+		}
+
+		// When we deal with additional disks (local disks), we'll need to map them like this...
+		//for i, disk := range p.Disks {
+		//	if i == 0 {
+		//		source := disk.Source
+		//
+		//		// TODO: Parse source URL instead of assuming same project/zone?
+		//		name := lastComponent(source)
+		//		d, err := cloud.Compute.Disks.Get(cloud.Project, *e.Zone, name).Do()
+		//		if err != nil {
+		//			if gce.IsNotFound(err) {
+		//				return nil, fmt.Errorf("disk not found %q: %v", source, err)
+		//			}
+		//			return nil, fmt.Errorf("error querying for disk %q: %v", source, err)
+		//		} else {
+		//			imageURL, err := gce.ParseGoogleCloudURL(d.SourceImage)
+		//			if err != nil {
+		//				return nil, fmt.Errorf("unable to parse image URL: %q", d.SourceImage)
+		//			}
+		//			actual.Image = fi.String(imageURL.Project + "/" + imageURL.Name)
+		//		}
+		//	}
+		//}
+
+		if p.Metadata != nil {
+			actual.Metadata = make(map[string]*fi.ResourceHolder)
+			for _, meta := range p.Metadata.Items {
+				actual.Metadata[meta.Key] = fi.WrapResource(fi.NewStringResource(meta.Value))
+			}
+		}
+
+		// Prevent spurious changes
+		actual.Name = e.Name
+
+		actual.ID = &r.Name
+		if e.ID == nil {
+			e.ID = actual.ID
+		}
+
+		return actual, nil
 	}
 
-	return actual, nil
+	return nil, nil
 }
 
 func (e *InstanceTemplate) Run(c *fi.Context) error {
@@ -167,6 +204,7 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 
 	var disks []*compute.AttachedDisk
 	disks = append(disks, &compute.AttachedDisk{
+		Kind: "compute#attachedDisk",
 		InitializeParams: &compute.AttachedDiskInitializeParams{
 			SourceImage: BuildImageURL(project, *e.BootDiskImage),
 			DiskSizeGb:  *e.BootDiskSizeGB,
@@ -190,6 +228,7 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 	var networkInterfaces []*compute.NetworkInterface
 	ni := &compute.NetworkInterface{
 		AccessConfigs: []*compute.AccessConfig{{
+			Kind: "compute#accessConfig",
 			//NatIP: *e.IPAddress.Address,
 			Type: "ONE_TO_ONE_NAT",
 		}},
@@ -227,7 +266,7 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 	}
 
 	i := &compute.InstanceTemplate{
-		Name: *e.Name,
+		Kind: "compute#instanceTemplate",
 		Properties: &compute.InstanceProperties{
 			CanIpForward: *e.CanIPForward,
 
@@ -236,6 +275,7 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 			MachineType: *e.MachineType,
 
 			Metadata: &compute.Metadata{
+				Kind:  "compute#metadata",
 				Items: metadataItems,
 			},
 
@@ -252,6 +292,55 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 	return i, nil
 }
 
+type ByKey []*compute.MetadataItems
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+func matches(l, r *compute.InstanceTemplate) bool {
+	normalizeInstanceProperties := func(v *compute.InstanceProperties) *compute.InstanceProperties {
+		c := *v
+		if c.Metadata != nil {
+			cm := *c.Metadata
+			c.Metadata = &cm
+			c.Metadata.Fingerprint = ""
+			sort.Sort(ByKey(c.Metadata.Items))
+		}
+		return &c
+	}
+	normalize := func(v *compute.InstanceTemplate) *compute.InstanceTemplate {
+		c := *v
+		c.SelfLink = ""
+		c.CreationTimestamp = ""
+		c.Id = 0
+		c.Name = ""
+		c.Properties = normalizeInstanceProperties(c.Properties)
+		return &c
+	}
+	normalizedL := normalize(l)
+	normalizedR := normalize(r)
+
+	if !reflect.DeepEqual(normalizedL, normalizedR) {
+		if glog.V(10) {
+			ls := fi.DebugAsJsonStringIndent(normalizedL)
+			rs := fi.DebugAsJsonStringIndent(normalizedR)
+			glog.V(10).Infof("Not equal")
+			glog.V(10).Infof(diff.FormatDiff(ls, rs))
+		}
+		return false
+	}
+
+	return true
+}
+
+func (e *InstanceTemplate) URL(project string) (string, error) {
+	if e.ID == nil {
+		return "", fmt.Errorf("InstanceTemplate not yet built; ID is not yet known")
+	}
+	return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/global/instanceTemplates/%s", project, *e.ID), nil
+}
+
 func (_ *InstanceTemplate) RenderGCE(t *gce.GCEAPITarget, a, e, changes *InstanceTemplate) error {
 	project := t.Cloud.Project
 
@@ -263,22 +352,31 @@ func (_ *InstanceTemplate) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Instanc
 	if a == nil {
 		glog.V(4).Infof("Creating InstanceTemplate %v", i)
 
-		_, err := t.Cloud.Compute.InstanceTemplates.Insert(t.Cloud.Project, i).Do()
+		name := fi.StringValue(e.Name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+		e.ID = &name
+		i.Name = name
+
+		op, err := t.Cloud.Compute.InstanceTemplates.Insert(t.Cloud.Project, i).Do()
 		if err != nil {
 			return fmt.Errorf("error creating InstanceTemplate: %v", err)
 		}
 
+		if err := t.Cloud.WaitForOp(op); err != nil {
+			return fmt.Errorf("error creating InstanceTemplate: %v", err)
+		}
 	} else {
-		// TODO: Make error again
-		glog.Errorf("Cannot apply changes to InstanceTemplate: %v", changes)
-		//return fmt.Errorf("Cannot apply changes to InstanceTemplate: %v", changes)
+		return fmt.Errorf("Cannot apply changes to InstanceTemplate: %v", changes)
 	}
 
 	return nil
 }
 
 type terraformInstanceTemplate struct {
-	Name                  string                       `json:"name"`
+	terraformInstanceCommon
+	NamePrefix string `json:"name_prefix"`
+}
+
+type terraformInstanceCommon struct {
 	CanIPForward          bool                         `json:"can_ip_forward"`
 	MachineType           string                       `json:"machine_type,omitempty"`
 	ServiceAccount        *terraformServiceAccount     `json:"service_account,omitempty"`
@@ -340,7 +438,7 @@ type terraformAccessConfig struct {
 	NatIP *terraform.Literal `json:"nat_ip,omitempty"`
 }
 
-func (t *terraformInstanceTemplate) AddNetworks(network *Network, subnet *Subnet, networkInterfacs []*compute.NetworkInterface) {
+func (t *terraformInstanceCommon) AddNetworks(network *Network, subnet *Subnet, networkInterfacs []*compute.NetworkInterface) {
 	for _, g := range networkInterfacs {
 		tf := &terraformNetworkInterface{}
 		if network != nil {
@@ -365,7 +463,7 @@ func (t *terraformInstanceTemplate) AddNetworks(network *Network, subnet *Subnet
 	}
 }
 
-func (t *terraformInstanceTemplate) AddMetadata(metadata *compute.Metadata) {
+func (t *terraformInstanceCommon) AddMetadata(metadata *compute.Metadata) {
 	if metadata != nil {
 		if t.Metadata == nil {
 			t.Metadata = make(map[string]string)
@@ -378,7 +476,7 @@ func (t *terraformInstanceTemplate) AddMetadata(metadata *compute.Metadata) {
 	}
 }
 
-func (t *terraformInstanceTemplate) AddServiceAccounts(serviceAccounts []*compute.ServiceAccount) {
+func (t *terraformInstanceCommon) AddServiceAccounts(serviceAccounts []*compute.ServiceAccount) {
 	for _, g := range serviceAccounts {
 		for _, scope := range g.Scopes {
 			if t.ServiceAccount == nil {
@@ -398,12 +496,13 @@ func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, c
 	}
 
 	tf := &terraformInstanceTemplate{
-		Name:         i.Name,
-		CanIPForward: i.Properties.CanIpForward,
-		//Description: i.Properties.Description,
-		MachineType: i.Properties.MachineType,
-		Tags:        i.Properties.Tags.Items,
+		NamePrefix: fi.StringValue(e.Name),
 	}
+
+	tf.CanIPForward = i.Properties.CanIpForward
+	tf.MachineType = lastComponent(i.Properties.MachineType)
+	//tf.Zone = i.Properties.Zone
+	tf.Tags = i.Properties.Tags.Items
 
 	tf.AddServiceAccounts(i.Properties.ServiceAccounts)
 

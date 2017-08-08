@@ -24,6 +24,7 @@ import (
 	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/diff"
+	"k8s.io/kops/pkg/testutils"
 	"path"
 	"strings"
 	"testing"
@@ -38,13 +39,20 @@ func TestCreateClusterMinimal(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal", "v1alpha2")
 }
 
+// TestCreateClusterMinimal runs kops create cluster, with a grab-bag of edge cases
+func TestCreateClusterComplex(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/complex", "v1alpha2")
+}
+
 // TestCreateClusterHA runs kops create cluster ha.example.com --zones us-test-1a,us-test-1b,us-test-1c --master-zones us-test-1a,us-test-1b,us-test-1c
 func TestCreateClusterHA(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha", "v1alpha1")
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_encrypt", "v1alpha1")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_encrypt", "v1alpha2")
 }
 
-// TestCreateClusterHASharedZones tests kops create cluster when the master count is bigger than the numebr of zones
+// TestCreateClusterHASharedZones tests kops create cluster when the master count is bigger than the number of zones
 func TestCreateClusterHASharedZones(t *testing.T) {
 	// Cannot be expressed in v1alpha1 API:	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_shared_zones", "v1alpha1")
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_shared_zones", "v1alpha2")
@@ -71,7 +79,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 	factoryOptions := &util.FactoryOptions{}
 	factoryOptions.RegistryPath = "memfs://tests"
 
-	h := NewIntegrationTestHarness(t)
+	h := testutils.NewIntegrationTestHarness(t)
 	defer h.Close()
 
 	h.SetupMockAWS()
@@ -118,7 +126,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 	}
 
 	// Compare cluster
-	clusters, err := clientset.Clusters().List(metav1.ListOptions{})
+	clusters, err := clientset.ListClusters(metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("error listing clusters: %v", err)
 	}
@@ -142,7 +150,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 
 	// Compare instance groups
 
-	instanceGroups, err := clientset.InstanceGroups(clusters.Items[0].ObjectMeta.Name).List(metav1.ListOptions{})
+	instanceGroups, err := clientset.InstanceGroupsFor(&clusters.Items[0]).List(metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("error listing instance groups: %v", err)
 	}

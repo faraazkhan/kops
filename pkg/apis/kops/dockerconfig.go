@@ -16,6 +16,7 @@ limitations under the License.
 
 package kops
 
+// DockerConfig is the configuration for docker
 type DockerConfig struct {
 	Bridge   *string            `json:"bridge,omitempty" flag:"bridge"`
 	LogLevel *string            `json:"logLevel,omitempty" flag:"log-level"`
@@ -23,12 +24,18 @@ type DockerConfig struct {
 	IPMasq   *bool              `json:"ipMasq,omitempty" flag:"ip-masq"`
 	LogOpt   *map[string]string `json:"logOpt,omitempty" flag:"log-opt"`
 
+	LogDriver string   `json:"logDriver,omitempty" flag:"log-driver"`
+	LogOpt    []string `json:"logOpt,omitempty" flag:"log-opt,repeat"`
+
 	// Storage maps to the docker storage flag
 	// But nodeup will also process a comma-separate list, selecting the first supported option
 	Storage *string `json:"storage,omitempty" flag:"storage-driver"`
 
 	InsecureRegistry *string `json:"insecureRegistry,omitempty" flag:"insecure-registry"`
-	MTU              *int32  `json:"mtu,omitempty" flag:"mtu"`
+
+	// Set mirrors for dockerd, benefiting cluster provisioning and image pulling
+	RegistryMirrors []string `json:"registryMirrors,omitempty" flag:"registry-mirror,repeat"`
+	MTU             *int32   `json:"mtu,omitempty" flag:"mtu"`
 
 	// The bridge cidr (--bip) flag
 	BridgeIP *string `json:"bridgeIP,omitempty" flag:"bip"`

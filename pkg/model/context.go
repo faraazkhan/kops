@@ -30,6 +30,12 @@ import (
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
+	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+)
+
+const (
+	clusterAutoscalerNodeTemplateLabel = "k8s.io/cluster-autoscaler/node-template/label/"
+	clusterAutoscalerNodeTemplateTaint = "k8s.io/cluster-autoscaler/node-template/taint/"
 )
 
 var UseLegacyELBName = featureflag.New("UseLegacyELBName", featureflag.Bool(false))
@@ -38,7 +44,6 @@ type KopsModelContext struct {
 	Cluster *kops.Cluster
 
 	Region         string
-	HostedZoneID   string // used to set up route53 IAM policy
 	InstanceGroups []*kops.InstanceGroup
 
 	SSHPublicKeys [][]byte
@@ -173,6 +178,19 @@ func (m *KopsModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) (ma
 		labels[k] = v
 	}
 
+	// Apply labels for cluster autoscaler node labels
+	for k, v := range ig.Spec.NodeLabels {
+		labels[clusterAutoscalerNodeTemplateLabel+k] = v
+	}
+
+	// Apply labels for cluster autoscaler node taints
+	for _, v := range ig.Spec.Taints {
+		splits := strings.SplitN(v, "=", 2)
+		if len(splits) > 1 {
+			labels[clusterAutoscalerNodeTemplateTaint+splits[0]] = splits[1]
+		}
+	}
+
 	// The system tags take priority because the cluster likely breaks without them...
 
 	if ig.Spec.Role == kops.InstanceGroupRoleMaster {
@@ -188,6 +206,27 @@ func (m *KopsModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) (ma
 	}
 
 	return labels, nil
+}
+
+// CloudTags computes the tags to apply to a normal cloud resource with the specified name
+func (m *KopsModelContext) CloudTags(name string, shared bool) map[string]string {
+	tags := make(map[string]string)
+
+	switch kops.CloudProviderID(m.Cluster.Spec.CloudProvider) {
+	case kops.CloudProviderAWS:
+		tags[awsup.TagClusterName] = m.Cluster.ObjectMeta.Name
+		if name != "" {
+			tags["Name"] = name
+		}
+
+		if shared {
+			tags["kubernetes.io/cluster/"+m.Cluster.ObjectMeta.Name] = "shared"
+		} else {
+			tags["kubernetes.io/cluster/"+m.Cluster.ObjectMeta.Name] = "owned"
+		}
+
+	}
+	return tags
 }
 
 func (m *KopsModelContext) UsesBastionDns() bool {
@@ -226,6 +265,17 @@ func (m *KopsModelContext) UsePrivateDNS() bool {
 		default:
 			glog.Warningf("Unknown DNS type %q", topology.DNS.Type)
 			return false
+		}
+	}
+
+	return false
+}
+
+// UseEtcdTLS checks to see if etcd tls is enabled
+func (c *KopsModelContext) UseEtcdTLS() bool {
+	for _, x := range c.Cluster.Spec.EtcdClusters {
+		if x.EnableEtcdTLS {
+			return true
 		}
 	}
 

@@ -52,14 +52,11 @@ You can create the kops IAM user from the command line using the following:
 ```bash
 aws iam create-group --group-name kops
 
-export arns="
-arn:aws:iam::aws:policy/AmazonEC2FullAccess
-arn:aws:iam::aws:policy/AmazonRoute53FullAccess
-arn:aws:iam::aws:policy/AmazonS3FullAccess
-arn:aws:iam::aws:policy/IAMFullAccess
-arn:aws:iam::aws:policy/AmazonVPCFullAccess"
-
-for arn in $arns; do aws iam attach-group-policy --policy-arn "$arn" --group-name kops; done
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonRoute53FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/IAMFullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonVPCFullAccess --group-name kops
 
 aws iam create-user --user-name kops
 
@@ -82,6 +79,12 @@ export AWS_SECRET_ACCESS_KEY=<secret key>
 ```
 
 ## Configure DNS
+
+Note: If you are using Kops 1.6.2 or later, then DNS configuration is 
+optional. Instead, a gossip-based cluster can be easily created. The 
+only requirement to trigger this is to have the cluster name end with 
+`k8s.local`. If a gossip-based cluster is created then you can skip 
+this section.
 
 In order to build a Kubernetes cluster with `kops`, we need to prepare
 somewhere to build the required DNS records.  There are three scenarios
@@ -121,7 +124,7 @@ ID=$(uuidgen) && aws route53 create-hosted-zone --name subdomain.example.com --c
 
 ```bash
 # Note: This example assumes you have jq installed locally.
-aws route53 list-hosted-zones | jq '.HostedZones[] | select(.Name=="subdomain.example.com.") | .Id'
+aws route53 list-hosted-zones | jq '.HostedZones[] | select(.Name=="example.com.") | .Id'
 ```
 
 * Create a new JSON file with your values (`subdomain.json`)
@@ -189,8 +192,8 @@ for some of these instructions.
 ID=$(uuidgen) && aws route53 create-hosted-zone --name subdomain.example.com --caller-reference $ID | jq .DelegationSet.NameServers
 ```
 
-* You will now go to your registrars page and log in. You will need to create a
-  new **SUBDOMAIN**, and use the 4 NS records listed above for the new
+* You will now go to your registrar's page and log in. You will need to create a
+  new **SUBDOMAIN**, and use the 4 NS records received from the above command for the new
   **SUBDOMAIN**. This **MUST** be done in order to use your cluster. Do **NOT**
   change your top level NS record, or you might take your site offline.
 
@@ -209,7 +212,15 @@ guide to include:
 kops create cluster --dns private $NAME
 ```
 
+If you have a mix of public and private zones, you will also need to include the `--dns-zone` argument with the hosted zone id you wish to deploy in:
+
+```
+kops create cluster --dns private --dns-zone ZABCDEFG $NAME
+```
+
 ## Testing your DNS setup
+
+This section is not be required if a gossip-based cluster is created.
 
 You should now able to dig your domain (or subdomain) and see the AWS Name
 Servers on the other end.
@@ -232,7 +243,7 @@ This is a critical component of setting up clusters. If you are experiencing
 problems with the Kubernetes API not coming up, chances are something is wrong
 with the clusters DNS.
 
-**Please DO NOT MOVE ON until you have validated your NS records!**
+**Please DO NOT MOVE ON until you have validated your NS records! This is not be required if a gossip-based cluster is created.**
 
 ## Cluster State storage
 
@@ -258,9 +269,14 @@ aws s3api put-bucket-versioning --bucket prefix-example-com-state-store  --versi
 
 ### Sharing an S3 bucket across multiple accounts
 
-If you configure a single S3 bucket to maintain kops state for clusters across
-multiple accounts, you may want to override the object ACLs which kops places
-on the state files.
+It is possible to use a single S3 bucket for storing kops state for clusters
+located in different accounts, by using [cross-account bucket policies](http://docs.aws.amazon.com/AmazonS3/latest/dev/example-walkthroughs-managing-access-example2.html#access-policies-walkthrough-cross-account-permissions-acctA-tasks).
+
+Kops will be able to use buckets configured with cross-account policies by default.
+
+In this case you may want to override the object ACLs which kops places on the
+state files, as default AWS ACLs will make it possible for an account that has
+delegated access to write files that the bucket owner can not read.
 
 To do this you should set the environment variable `KOPS_STATE_S3_ACL` to the
 preferred object ACL, for example `bucket-owner-full-control`.
@@ -272,11 +288,18 @@ documentation](http://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#
 
 ## Prepare local environment
 
-We're ready to start creating our first cluster!  Let's first setup a few
+We're ready to start creating our first cluster!  Let's first set up a few
 environment variables to make this process easier.
 
 ```bash
 export NAME=myfirstcluster.example.com
+export KOPS_STATE_STORE=s3://prefix-example-com-state-store
+```
+
+For a gossip-based cluster, make sure the name ends with `k8s.local`. For example:
+
+```bash
+export NAME=myfirstcluster.k8s.local
 export KOPS_STATE_STORE=s3://prefix-example-com-state-store
 ```
 
@@ -294,7 +317,7 @@ aws ec2 describe-availability-zones --region us-west-2
 
 Below is a create cluster command.  We'll use the most basic example possible,
 with more verbose examples in [advanced creation](advanced_create.md).  The
-below command will generate a cluster configuration, but not start building it.
+below command will generate a cluster configuration, but not start building it. Make sure that you have generated SSH key pair before creating the cluster.
 
 ```bash
 kops create cluster \
@@ -359,6 +382,26 @@ You can look at all the system components with the following command.
 
 ```
 kubectl -n kube-system get po
+```
+
+## Delete the Cluster
+
+Running a Kubernetes cluster within AWS obviously costs money, and so you may
+want to delete your cluster if you are finished running experiments.
+
+You can preview all of the AWS resources that will be destroyed when the cluster
+is deleted by issuing the following command.
+
+```
+kops delete cluster --name ${NAME}
+```
+
+When you are sure you want to delete your cluster, issue the delete command
+with the `--yes` flag. Note that this command is very destructive, and will
+delete your cluster and everything contained within it!
+
+```
+kops delete cluster --name ${NAME} --yes
 ```
 
 # What's next?

@@ -34,13 +34,15 @@ import (
 
 //go:generate fitask -type=IAMRolePolicy
 type IAMRolePolicy struct {
-	ID   *string
+	ID        *string
+	Lifecycle *fi.Lifecycle
+
 	Name *string
 	Role *IAMRole
 
 	// The PolicyDocument to create as an inline policy.
 	// If the PolicyDocument is empty, the policy will be removed.
-	PolicyDocument *fi.ResourceHolder
+	PolicyDocument fi.Resource
 }
 
 func (e *IAMRolePolicy) Find(c *fi.Context) (*IAMRolePolicy, error) {
@@ -76,9 +78,13 @@ func (e *IAMRolePolicy) Find(c *fi.Context) (*IAMRolePolicy, error) {
 		}
 		actual.PolicyDocument = fi.WrapResource(fi.NewStringResource(policy))
 	}
+
 	actual.Name = p.PolicyName
 
 	e.ID = actual.ID
+
+	// Avoid spurious changes
+	actual.Lifecycle = e.Lifecycle
 
 	return actual, nil
 }
@@ -97,7 +103,7 @@ func (s *IAMRolePolicy) CheckChanges(a, e, changes *IAMRolePolicy) error {
 }
 
 func (_ *IAMRolePolicy) ShouldCreate(a, e, changes *IAMRolePolicy) (bool, error) {
-	ePolicy, err := e.PolicyDocument.AsString()
+	ePolicy, err := e.policyDocumentString()
 	if err != nil {
 		return false, fmt.Errorf("error rendering PolicyDocument: %v", err)
 	}
@@ -109,7 +115,7 @@ func (_ *IAMRolePolicy) ShouldCreate(a, e, changes *IAMRolePolicy) (bool, error)
 }
 
 func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRolePolicy) error {
-	policy, err := e.PolicyDocument.AsString()
+	policy, err := e.policyDocumentString()
 	if err != nil {
 		return fmt.Errorf("error rendering PolicyDocument: %v", err)
 	}
@@ -143,12 +149,9 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 		if changes.PolicyDocument != nil {
 			glog.V(2).Infof("Applying changed role policy to %q:", *e.Name)
 
-			actualPolicy := ""
-			if a.PolicyDocument != nil {
-				actualPolicy, err = a.PolicyDocument.AsString()
-				if err != nil {
-					return fmt.Errorf("error reading actual policy document: %v", err)
-				}
+			actualPolicy, err := a.policyDocumentString()
+			if err != nil {
+				return fmt.Errorf("error reading actual policy document: %v", err)
 			}
 
 			if actualPolicy == policy {
@@ -180,6 +183,13 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 	return nil // No tags in IAM
 }
 
+func (e *IAMRolePolicy) policyDocumentString() (string, error) {
+	if e.PolicyDocument == nil {
+		return "", nil
+	}
+	return fi.ResourceAsString(e.PolicyDocument)
+}
+
 type terraformIAMRolePolicy struct {
 	Name           *string            `json:"name"`
 	Role           *terraform.Literal `json:"role"`
@@ -187,15 +197,14 @@ type terraformIAMRolePolicy struct {
 }
 
 func (_ *IAMRolePolicy) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *IAMRolePolicy) error {
-	{
-		policyString, err := e.PolicyDocument.AsString()
-		if err != nil {
-			return fmt.Errorf("error rendering PolicyDocument: %v", err)
-		}
-		if policyString == "" {
-			// A deletion; we simply don't render; terraform will observe the removal
-			return nil
-		}
+	policyString, err := e.policyDocumentString()
+	if err != nil {
+		return fmt.Errorf("error rendering PolicyDocument: %v", err)
+	}
+
+	if policyString == "" {
+		// A deletion; we simply don't render; terraform will observe the removal
+		return nil
 	}
 
 	policy, err := t.AddFile("aws_iam_role_policy", *e.Name, "policy", e.PolicyDocument)
@@ -223,15 +232,13 @@ type cloudformationIAMRolePolicy struct {
 }
 
 func (_ *IAMRolePolicy) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *IAMRolePolicy) error {
-	{
-		policyString, err := e.PolicyDocument.AsString()
-		if err != nil {
-			return fmt.Errorf("error rendering PolicyDocument: %v", err)
-		}
-		if policyString == "" {
-			// A deletion; we simply don't render; cloudformation will observe the removal
-			return nil
-		}
+	policyString, err := e.policyDocumentString()
+	if err != nil {
+		return fmt.Errorf("error rendering PolicyDocument: %v", err)
+	}
+	if policyString == "" {
+		// A deletion; we simply don't render; cloudformation will observe the removal
+		return nil
 	}
 
 	tf := &cloudformationIAMRolePolicy{
@@ -240,13 +247,8 @@ func (_ *IAMRolePolicy) RenderCloudformation(t *cloudformation.CloudformationTar
 	}
 
 	{
-		jsonString, err := e.PolicyDocument.AsBytes()
-		if err != nil {
-			return err
-		}
-
 		data := make(map[string]interface{})
-		err = json.Unmarshal(jsonString, &data)
+		err = json.Unmarshal([]byte(policyString), &data)
 		if err != nil {
 			return fmt.Errorf("error parsing PolicyDocument: %v", err)
 		}

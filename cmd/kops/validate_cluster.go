@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kops/cmd/kops/util"
 	api "k8s.io/kops/pkg/apis/kops"
+	apiutil "k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/validation"
 	"k8s.io/kops/util/pkg/tables"
 )
@@ -42,10 +43,10 @@ func NewCmdValidateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	options := &ValidateClusterOptions{}
 
 	cmd := &cobra.Command{
-		Use: "cluster",
-		//Aliases: []string{"cluster"},
-		Short: "Validate cluster",
-		Long:  `Validate a kubernetes cluster`,
+		Use:     "cluster",
+		Short:   validate_short,
+		Long:    validate_long,
+		Example: validate_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunValidateCluster(f, cmd, args, os.Stdout, options)
 			if err != nil {
@@ -73,7 +74,7 @@ func RunValidateCluster(f *util.Factory, cmd *cobra.Command, args []string, out 
 		return err
 	}
 
-	list, err := clientSet.InstanceGroups(cluster.ObjectMeta.Name).List(metav1.ListOptions{})
+	list, err := clientSet.InstanceGroupsFor(cluster).List(metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("cannot get InstanceGroups for %q: %v", cluster.ObjectMeta.Name, err)
 	}
@@ -151,9 +152,9 @@ func RunValidateCluster(f *util.Factory, cmd *cobra.Command, args []string, out 
 	nodeTable.AddColumn("ROLE", func(n v1.Node) string {
 		// TODO: Maybe print the instance group role instead?
 		// TODO: Maybe include the instance group name?
-		role := "node"
-		if val, ok := n.ObjectMeta.Labels[api.RoleLabelName]; ok {
-			role = val
+		role := apiutil.GetNodeRole(&n)
+		if role == "" {
+			role = "node"
 		}
 		return role
 	})

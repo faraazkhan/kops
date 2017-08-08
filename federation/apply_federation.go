@@ -21,9 +21,12 @@ import (
 	crypto_rand "crypto/rand"
 	"crypto/rsa"
 	"fmt"
+	"strings"
+	"text/template"
+
 	"github.com/golang/glog"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/pkg/api/v1"
 	"k8s.io/kops/federation/model"
@@ -32,14 +35,12 @@ import (
 	kopsapi "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/client/simple"
+	"k8s.io/kops/pkg/kubeconfig"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
 	"k8s.io/kops/upup/pkg/fi/k8sapi"
-	"k8s.io/kops/upup/pkg/kutil"
-	federation_clientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
+	"k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	k8sapiv1 "k8s.io/kubernetes/pkg/api/v1"
-	"strings"
-	"text/template"
 )
 
 type ApplyFederationOperation struct {
@@ -56,7 +57,7 @@ type ApplyFederationOperation struct {
 	apiserverSecretName     string
 }
 
-func (o *ApplyFederationOperation) FindKubecfg() (*kutil.KubeconfigBuilder, error) {
+func (o *ApplyFederationOperation) FindKubecfg() (*kubeconfig.KubeconfigBuilder, error) {
 	// TODO: Only if not yet set?
 	//	hasKubecfg, err := hasKubecfg(f.Name)
 	//	if err != nil {
@@ -66,9 +67,12 @@ func (o *ApplyFederationOperation) FindKubecfg() (*kutil.KubeconfigBuilder, erro
 
 	// Loop through looking for a configured cluster
 	for _, controller := range o.Federation.Spec.Controllers {
-		cluster, err := o.KopsClient.Clusters().Get(controller)
+		cluster, err := o.KopsClient.GetCluster(controller)
 		if err != nil {
 			return nil, fmt.Errorf("error reading cluster %q: %v", controller, err)
+		}
+		if cluster == nil {
+			return nil, fmt.Errorf("cluster %q not found", controller)
 		}
 
 		context, err := o.federationContextForCluster(cluster)
@@ -115,9 +119,12 @@ func (o *ApplyFederationOperation) Run() error {
 
 	var controllerKubernetesClients []kubernetes.Interface
 	for _, controller := range o.Federation.Spec.Controllers {
-		cluster, err := o.KopsClient.Clusters().Get(controller)
+		cluster, err := o.KopsClient.GetCluster(controller)
 		if err != nil {
 			return fmt.Errorf("error reading cluster %q: %v", controller, err)
+		}
+		if cluster == nil {
+			return fmt.Errorf("cluster %q not found", controller)
 		}
 
 		context, err := o.federationContextForCluster(cluster)
@@ -146,19 +153,18 @@ func (o *ApplyFederationOperation) Run() error {
 	if err != nil {
 		return err
 	}
-	//k8sControllerClient, err := release_1_5.NewForConfig(federationRestConfig)
-	//if err != nil {
-	//	return err
-	//}
 
 	for _, member := range o.Federation.Spec.Members {
 		glog.V(2).Infof("configuring member cluster %q", member)
-		cluster, err := o.KopsClient.Clusters().Get(member)
+		cluster, err := o.KopsClient.GetCluster(member)
 		if err != nil {
 			return fmt.Errorf("error reading cluster %q: %v", member, err)
 		}
+		if cluster == nil {
+			return fmt.Errorf("cluster %q not found", member)
+		}
 
-		clusterName := strings.Replace(cluster.ObjectMeta.Name, ".", "-", -1)
+		clusterName := strings.Replace(cluster.Name, ".", "-", -1)
 
 		a := &FederationCluster{
 			FederationNamespace: o.namespace,
@@ -166,7 +172,7 @@ func (o *ApplyFederationOperation) Run() error {
 			ControllerKubernetesClients: controllerKubernetesClients,
 			FederationClient:            federationControllerClient,
 
-			ClusterSecretName: "secret-" + cluster.ObjectMeta.Name,
+			ClusterSecretName: "secret-" + cluster.Name,
 			ClusterName:       clusterName,
 			ApiserverHostname: cluster.Spec.MasterPublicName,
 		}
@@ -212,7 +218,7 @@ func (o *ApplyFederationOperation) buildApiserverKeypair() *fitasks.Keypair {
 	keypairName := "secret-" + o.apiserverHostName
 	keypair := &fitasks.Keypair{
 		Name:    fi.String(keypairName),
-		Subject: "cn=" + o.Federation.ObjectMeta.Name,
+		Subject: "cn=" + o.Federation.Name,
 		Type:    "server",
 	}
 
@@ -362,7 +368,7 @@ func (o *ApplyFederationOperation) executeTemplate(key string, templateDefinitio
 func (o *ApplyFederationOperation) EnsureNamespace(c *fi.Context) error {
 	k8s := c.Target.(*kubernetestarget.KubernetesTarget).KubernetesClient
 
-	ns, err := k8s.Core().Namespaces().Get(o.namespace, meta_v1.GetOptions{})
+	ns, err := k8s.CoreV1().Namespaces().Get(o.namespace, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			ns = nil

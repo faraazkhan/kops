@@ -28,6 +28,7 @@ import (
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/apis/kops/validation"
+	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/util/pkg/tables"
@@ -43,9 +44,10 @@ var upgradeCluster UpgradeClusterCmd
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "cluster",
-		Short: "Upgrade cluster",
-		Long:  `Upgrades a k8s cluster.`,
+		Use:     "cluster",
+		Short:   upgrade_short,
+		Long:    upgrade_long,
+		Example: upgrade_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := upgradeCluster.Run(args)
 			if err != nil {
@@ -85,7 +87,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 		return err
 	}
 
-	list, err := clientset.InstanceGroups(cluster.ObjectMeta.Name).List(metav1.ListOptions{})
+	list, err := clientset.InstanceGroupsFor(cluster).List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -282,7 +284,8 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 			return fmt.Errorf("error populating configuration: %v", err)
 		}
 
-		fullCluster, err := cloudup.PopulateClusterSpec(cluster)
+		assetBuilder := assets.NewAssetBuilder()
+		fullCluster, err := cloudup.PopulateClusterSpec(cluster, assetBuilder)
 		if err != nil {
 			return err
 		}
@@ -293,13 +296,13 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 		}
 
 		// Note we perform as much validation as we can, before writing a bad config
-		_, err = clientset.Clusters().Update(cluster)
+		_, err = clientset.ClustersFor(cluster).Update(cluster)
 		if err != nil {
 			return err
 		}
 
 		for _, g := range instanceGroups {
-			_, err := clientset.InstanceGroups(cluster.ObjectMeta.Name).Update(g)
+			_, err := clientset.InstanceGroupsFor(cluster).Update(g)
 			if err != nil {
 				return fmt.Errorf("error writing InstanceGroup %q: %v", g.ObjectMeta.Name, err)
 			}

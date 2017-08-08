@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	api "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -87,7 +88,8 @@ func TestPopulateCluster_Default_NoError(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	_, err = PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	_, err = PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -98,7 +100,8 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 	c.Spec.Docker = &api.DockerConfig{
 		MTU:              fi.Int32(5678),
 		InsecureRegistry: fi.String("myregistry.com:1234"),
-		LogOpt:           fi.String("env=FOO"),
+		RegistryMirrors:  []string{"https://registry.example.com"},
+		LogOpt:           []string{"env=FOO"},
 	}
 
 	err := PerformAssignments(c)
@@ -108,7 +111,8 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -121,7 +125,11 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 		t.Fatalf("Unexpected Docker InsecureRegistry: %v", full.Spec.Docker.InsecureRegistry)
 	}
 
-	if fi.StringValue(full.Spec.Docker.LogOpt) != "env=FOO" {
+	if strings.Join(full.Spec.Docker.RegistryMirrors, "!") != "https://registry.example.com" {
+		t.Fatalf("Unexpected Docker RegistryMirrors: %v", full.Spec.Docker.RegistryMirrors)
+	}
+
+	if strings.Join(full.Spec.Docker.LogOpt, "!") != "env=FOO" {
 		t.Fatalf("Unexpected Docker LogOpt: %v", full.Spec.Docker.LogOpt)
 	}
 }
@@ -134,7 +142,8 @@ func TestPopulateCluster_StorageDefault(t *testing.T) {
 	}
 
 	addEtcdClusters(c)
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -151,7 +160,8 @@ func build(c *api.Cluster) (*api.Cluster, error) {
 	}
 
 	addEtcdClusters(c)
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		return nil, fmt.Errorf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -227,7 +237,8 @@ func TestPopulateCluster_Custom_CIDR(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -247,7 +258,8 @@ func TestPopulateCluster_IsolateMasters(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -270,7 +282,8 @@ func TestPopulateCluster_IsolateMastersFalse(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -361,7 +374,8 @@ func TestPopulateCluster_BastionIdleTimeoutInvalidNegative_Required(t *testing.T
 }
 
 func expectErrorFromPopulateCluster(t *testing.T, c *api.Cluster, message string) {
-	_, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	_, err := PopulateClusterSpec(c, assetBuilder)
 	if err == nil {
 		t.Fatalf("Expected error from PopulateCluster")
 	}
@@ -395,7 +409,8 @@ func TestPopulateCluster_AnonymousAuth(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -420,7 +435,8 @@ func TestPopulateCluster_AnonymousAuth_14(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -471,7 +487,8 @@ func TestPopulateCluster_KubeController_High_Enough_Version(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -493,7 +510,8 @@ func TestPopulateCluster_KubeController_Fail(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	full, err := PopulateClusterSpec(c)
+	assetBuilder := assets.NewAssetBuilder()
+	full, err := PopulateClusterSpec(c, assetBuilder)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}

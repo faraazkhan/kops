@@ -35,7 +35,9 @@ import (
 // Elastic IP
 // Representation the EIP AWS task
 type ElasticIP struct {
-	Name     *string
+	Name      *string
+	Lifecycle *fi.Lifecycle
+
 	ID       *string
 	PublicIP *string
 
@@ -56,7 +58,7 @@ func (e *ElasticIP) CompareWithID() *string {
 
 var _ fi.HasAddress = &ElasticIP{}
 
-func (e *ElasticIP) FindAddress(context *fi.Context) (*string, error) {
+func (e *ElasticIP) FindIPAddress(context *fi.Context) (*string, error) {
 	actual, err := e.find(context.Cloud.(awsup.AWSCloud))
 	if err != nil {
 		return nil, fmt.Errorf("error querying for ElasticIP: %v", err)

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,12 +36,15 @@ import (
 
 var StoreVersion = v1alpha2.SchemeGroupVersion
 
+type ValidationFunction func(o runtime.Object) error
+
 type commonVFS struct {
 	kind               string
 	basePath           vfs.Path
 	decoder            runtime.Decoder
 	encoder            runtime.Encoder
 	defaultReadVersion *schema.GroupVersionKind
+	validate           ValidationFunction
 }
 
 func (c *commonVFS) init(kind string, basePath vfs.Path, storeVersion runtime.GroupVersioner) {
@@ -71,21 +75,24 @@ func (c *commonVFS) list(items interface{}, options metav1.ListOptions) (interfa
 }
 
 func (c *commonVFS) create(i runtime.Object) error {
-	objectMeta, err := metav1.ObjectMetaFor(i)
+	objectMeta, err := meta.Accessor(i)
 	if err != nil {
 		return err
 	}
 
-	err = i.(kops.ApiType).Validate()
-	if err != nil {
-		return err
+	if c.validate != nil {
+		err = c.validate(i)
+		if err != nil {
+			return err
+		}
 	}
 
-	if objectMeta.CreationTimestamp.IsZero() {
-		objectMeta.CreationTimestamp = v1.NewTime(time.Now().UTC())
+	creationTimestamp := objectMeta.GetCreationTimestamp()
+	if creationTimestamp.IsZero() {
+		objectMeta.SetCreationTimestamp(v1.NewTime(time.Now().UTC()))
 	}
 
-	err = c.writeConfig(c.basePath.Join(objectMeta.Name), i, vfs.WriteOptionCreate)
+	err = c.writeConfig(c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionCreate)
 	if err != nil {
 		if os.IsExist(err) {
 			return err
@@ -162,21 +169,24 @@ func (c *commonVFS) writeConfig(configPath vfs.Path, o runtime.Object, writeOpti
 }
 
 func (c *commonVFS) update(i runtime.Object) error {
-	objectMeta, err := metav1.ObjectMetaFor(i)
+	objectMeta, err := meta.Accessor(i)
 	if err != nil {
 		return err
 	}
 
-	err = i.(kops.ApiType).Validate()
-	if err != nil {
-		return err
+	if c.validate != nil {
+		err = c.validate(i)
+		if err != nil {
+			return err
+		}
 	}
 
-	if objectMeta.CreationTimestamp.IsZero() {
-		objectMeta.CreationTimestamp = v1.NewTime(time.Now().UTC())
+	creationTimestamp := objectMeta.GetCreationTimestamp()
+	if creationTimestamp.IsZero() {
+		objectMeta.SetCreationTimestamp(v1.NewTime(time.Now().UTC()))
 	}
 
-	err = c.writeConfig(c.basePath.Join(objectMeta.Name), i, vfs.WriteOptionOnlyIfExists)
+	err = c.writeConfig(c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionOnlyIfExists)
 	if err != nil {
 		return fmt.Errorf("error writing %s: %v", c.kind, err)
 	}

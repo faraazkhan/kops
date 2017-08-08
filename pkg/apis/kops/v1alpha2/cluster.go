@@ -20,9 +20,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +genclient=true
+
 type Cluster struct {
-	metav1.TypeMeta `json:",inline"`
-	ObjectMeta      metav1.ObjectMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec ClusterSpec `json:"spec,omitempty"`
 }
@@ -114,6 +116,9 @@ type ClusterSpec struct {
 	// Currently only a single CIDR is supported (though a richer grammar could be added in future)
 	SSHAccess []string `json:"sshAccess,omitempty"`
 
+	// HTTPProxy defines connection information to support use of a private cluster behind an forward HTTP Proxy
+	EgressProxy *EgressProxySpec `json:"egressProxy,omitempty"`
+
 	// KubernetesAPIAccess determines the permitted access to the API endpoints (master HTTPS)
 	// Currently only a single CIDR is supported (though a richer grammar could be added in future)
 	KubernetesAPIAccess []string `json:"kubernetesApiAccess,omitempty"`
@@ -156,8 +161,62 @@ type ClusterSpec struct {
 	// API field controls how the API is exposed outside the cluster
 	API *AccessSpec `json:"api,omitempty"`
 
+	// Authentication field controls how the cluster is configured for authentication
+	Authentication *AuthenticationSpec `json:"authentication,omitempty"`
+
+	// Authorization field controls how the cluster is configured for authorization
+	Authorization *AuthorizationSpec `json:"authorization,omitempty"`
+
 	// Tags for AWS resources
 	CloudLabels map[string]string `json:"cloudLabels,omitempty"`
+
+	// Hooks for custom actions e.g. on first installation
+	Hooks []HookSpec `json:"hooks,omitempty"`
+
+	// Alternative locations for files and containers
+	Assets *Assets `json:"assets,omitempty"`
+}
+
+type Assets struct {
+	ContainerRegistry *string `json:"containerRegistry,omitempty"`
+	FileRepository    *string `json:"fileRepository,omitempty"`
+}
+
+type HookSpec struct {
+	ExecContainer *ExecContainerAction `json:"execContainer,omitempty"`
+}
+
+type ExecContainerAction struct {
+	// Docker image name.
+	Image string `json:"image,omitempty" `
+
+	Command []string `json:"command,omitempty"`
+}
+
+type AuthenticationSpec struct {
+	Kopeio *KopeioAuthenticationSpec `json:"kopeio,omitempty"`
+}
+
+func (s *AuthenticationSpec) IsEmpty() bool {
+	return s.Kopeio == nil
+}
+
+type KopeioAuthenticationSpec struct {
+}
+
+type AuthorizationSpec struct {
+	AlwaysAllow *AlwaysAllowAuthorizationSpec `json:"alwaysAllow,omitempty"`
+	RBAC        *RBACAuthorizationSpec        `json:"rbac,omitempty"`
+}
+
+func (s *AuthorizationSpec) IsEmpty() bool {
+	return s.RBAC == nil && s.AlwaysAllow == nil
+}
+
+type RBACAuthorizationSpec struct {
+}
+
+type AlwaysAllowAuthorizationSpec struct {
 }
 
 type AccessSpec struct {
@@ -197,7 +256,8 @@ type KubeDNSConfig struct {
 type EtcdClusterSpec struct {
 	// Name is the name of the etcd cluster (main, events etc)
 	Name string `json:"name,omitempty"`
-
+	// EnableEtcdTLS indicates the etcd service should use TLS between peers and clients
+	EnableEtcdTLS bool `json:"enableEtcdTLS,omitempty"`
 	// EtcdMember stores the configurations for each member of the cluster (including the data volume)
 	Members []*EtcdMemberSpec `json:"etcdMembers,omitempty"`
 }
@@ -235,4 +295,18 @@ type ClusterSubnetSpec struct {
 	Egress string `json:"egress,omitempty"`
 
 	Type SubnetType `json:"type,omitempty"`
+}
+
+type EgressProxySpec struct {
+	HTTPProxy     HTTPProxy `json:"httpProxy,omitempty"`
+	ProxyExcludes string    `json:"excludes,omitempty"`
+}
+
+type HTTPProxy struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
+
+	// TODO #3070
+	// User     string `json:"user,omitempty"`
+	// Password string `json:"password,omitempty"`
 }

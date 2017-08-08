@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
@@ -30,9 +31,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/aws/aws-sdk-go/service/route53/route53iface"
 	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider"
-	k8sroute53 "k8s.io/kubernetes/federation/pkg/dnsprovider/providers/aws/route53"
+	dnsproviderroute53 "k8s.io/kubernetes/federation/pkg/dnsprovider/providers/aws/route53"
 	"strings"
 	"time"
 )
@@ -76,7 +79,7 @@ type AWSCloud interface {
 	EC2() ec2iface.EC2API
 	IAM() *iam.IAM
 	ELB() *elb.ELB
-	Autoscaling() *autoscaling.AutoScaling
+	Autoscaling() autoscalingiface.AutoScalingAPI
 	Route53() route53iface.Route53API
 
 	// TODO: Document and rationalize these tags/filters methods
@@ -114,6 +117,9 @@ type AWSCloud interface {
 
 	// WithTags created a copy of AWSCloud with the specified default-tags bound
 	WithTags(tags map[string]string) AWSCloud
+
+	// DefaultInstanceType determines a suitable instance type for the specified instance group
+	DefaultInstanceType(cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error)
 }
 
 type awsCloudImplementation struct {
@@ -131,8 +137,8 @@ type awsCloudImplementation struct {
 
 var _ fi.Cloud = &awsCloudImplementation{}
 
-func (c *awsCloudImplementation) ProviderID() fi.CloudProviderID {
-	return fi.CloudProviderAWS
+func (c *awsCloudImplementation) ProviderID() kops.CloudProviderID {
+	return kops.CloudProviderAWS
 }
 
 func (c *awsCloudImplementation) Region() string {
@@ -529,7 +535,7 @@ func (t *awsCloudImplementation) DescribeInstance(instanceID string) (*ec2.Insta
 		return nil, nil
 	}
 	if len(response.Reservations) != 1 {
-		glog.Fatalf("found multiple Reservations for instance id")
+		glog.Fatalf("found multiple Reservations for %q", instanceID)
 	}
 
 	reservation := response.Reservations[0]
@@ -538,7 +544,7 @@ func (t *awsCloudImplementation) DescribeInstance(instanceID string) (*ec2.Insta
 	}
 
 	if len(reservation.Instances) != 1 {
-		return nil, fmt.Errorf("found multiple Instances for instance id")
+		return nil, fmt.Errorf("found multiple Instances for %q", instanceID)
 	}
 
 	instance := reservation.Instances[0]
@@ -560,7 +566,7 @@ func (t *awsCloudImplementation) DescribeVPC(vpcID string) (*ec2.Vpc, error) {
 		return nil, nil
 	}
 	if len(response.Vpcs) != 1 {
-		return nil, fmt.Errorf("found multiple VPCs for instance id")
+		return nil, fmt.Errorf("found multiple VPCs for %q", vpcID)
 	}
 
 	vpc := response.Vpcs[0]
@@ -677,7 +683,7 @@ func ValidateZones(zones []string, cloud AWSCloud) error {
 }
 
 func (c *awsCloudImplementation) DNS() (dnsprovider.Interface, error) {
-	provider, err := dnsprovider.GetDnsProvider(k8sroute53.ProviderName, nil)
+	provider, err := dnsprovider.GetDnsProvider(dnsproviderroute53.ProviderName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Error building (k8s) DNS provider: %v", err)
 	}
@@ -700,7 +706,7 @@ func (c *awsCloudImplementation) ELB() *elb.ELB {
 	return c.elb
 }
 
-func (c *awsCloudImplementation) Autoscaling() *autoscaling.AutoScaling {
+func (c *awsCloudImplementation) Autoscaling() autoscalingiface.AutoScalingAPI {
 	return c.autoscaling
 }
 
@@ -746,4 +752,85 @@ func (c *awsCloudImplementation) FindVPCInfo(vpcID string) (*fi.VPCInfo, error) 
 	}
 
 	return vpcInfo, nil
+}
+
+// DefaultInstanceType determines an instance type for the specified cluster & instance group
+func (c *awsCloudImplementation) DefaultInstanceType(cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error) {
+	var candidates []string
+
+	switch ig.Spec.Role {
+	case kops.InstanceGroupRoleMaster:
+		// Some regions do not (currently) support the m3 family; the c4 large is the cheapest non-burstable instance
+		// (us-east-2, ca-central-1, eu-west-2, ap-northeast-2).
+		// Also some accounts are no longer supporting m3 in us-east-1 zones
+		candidates = []string{"m3.medium", "c4.large"}
+
+	case kops.InstanceGroupRoleNode:
+		candidates = []string{"t2.medium"}
+
+	case kops.InstanceGroupRoleBastion:
+		candidates = []string{"t2.micro"}
+
+	default:
+		return "", fmt.Errorf("unhandled role %q", ig.Spec.Role)
+	}
+
+	// Find the AZs the InstanceGroup targets
+	igZones := sets.NewString()
+	for _, subnetName := range ig.Spec.Subnets {
+		var subnet *kops.ClusterSubnetSpec
+		for i := range cluster.Spec.Subnets {
+			if cluster.Spec.Subnets[i].Name == subnetName {
+				subnet = &cluster.Spec.Subnets[i]
+			}
+		}
+		if subnet == nil {
+			return "", fmt.Errorf("subnet %q is not defined in cluster", subnetName)
+		}
+		igZones.Insert(subnet.Zone)
+	}
+
+	// TODO: Validate that instance type exists in all AZs, but skip AZs that don't support any VPC stuff
+	for _, instanceType := range candidates {
+		zones, err := c.zonesWithInstanceType(instanceType)
+		if err != nil {
+			return "", err
+		}
+		if zones.IsSuperset(igZones) {
+			return instanceType, nil
+		} else {
+			glog.V(2).Infof("can't use instance type %q, available in zones %v but need %v", instanceType, zones, igZones)
+		}
+	}
+
+	return "", fmt.Errorf("could not find a suitable supported instance type for the instance group %q (type %q) in region %q", ig.Name, ig.Spec.Role, c.region)
+}
+
+// supportsInstanceType uses the DescribeReservedInstancesOfferings API call to determine if an instance type is supported in a region
+func (c *awsCloudImplementation) zonesWithInstanceType(instanceType string) (sets.String, error) {
+	glog.V(4).Infof("checking if instance type %q is supported in region %q", instanceType, c.region)
+	request := &ec2.DescribeReservedInstancesOfferingsInput{}
+	request.InstanceTenancy = aws.String("default")
+	request.IncludeMarketplace = aws.Bool(false)
+	request.OfferingClass = aws.String("standard")
+	request.OfferingType = aws.String("No Upfront")
+	request.ProductDescription = aws.String("Linux/UNIX (Amazon VPC)")
+	request.InstanceType = aws.String(instanceType)
+
+	zones := sets.NewString()
+
+	response, err := c.ec2.DescribeReservedInstancesOfferings(request)
+	if err != nil {
+		return zones, fmt.Errorf("error checking if instance type %q is supported in region %q: %v", instanceType, c.region, err)
+	}
+
+	for _, item := range response.ReservedInstancesOfferings {
+		if aws.StringValue(item.InstanceType) == instanceType {
+			zones.Insert(aws.StringValue(item.AvailabilityZone))
+		} else {
+			glog.Warningf("skipping non-matching instance type offering: %v", item)
+		}
+	}
+
+	return zones, nil
 }

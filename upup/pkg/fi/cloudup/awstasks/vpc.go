@@ -31,7 +31,9 @@ import (
 
 //go:generate fitask -type=VPC
 type VPC struct {
-	Name               *string
+	Name      *string
+	Lifecycle *fi.Lifecycle
+
 	ID                 *string
 	CIDR               *string
 	EnableDNSHostnames *bool
@@ -39,6 +41,8 @@ type VPC struct {
 
 	// Shared is set if this is a shared VPC
 	Shared *bool
+
+	Tags map[string]string
 }
 
 var _ fi.CompareWithID = &VPC{}
@@ -74,6 +78,7 @@ func (e *VPC) Find(c *fi.Context) (*VPC, error) {
 		ID:   vpc.VpcId,
 		CIDR: vpc.CidrBlock,
 		Name: findNameTag(vpc.Tags),
+		Tags: intersectTags(vpc.Tags, e.Tags),
 	}
 
 	glog.V(4).Infof("found matching VPC %v", actual)
@@ -101,6 +106,7 @@ func (e *VPC) Find(c *fi.Context) (*VPC, error) {
 	if e.ID == nil {
 		e.ID = actual.ID
 	}
+	actual.Lifecycle = e.Lifecycle
 
 	return actual, nil
 }
@@ -183,7 +189,7 @@ func (_ *VPC) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPC) error {
 		}
 	}
 
-	tags := t.Cloud.BuildTags(e.Name)
+	tags := e.Tags
 	if shared {
 		// Don't tag shared resources
 		tags = nil
@@ -199,8 +205,6 @@ type terraformVPC struct {
 }
 
 func (_ *VPC) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *VPC) error {
-	cloud := t.Cloud.(awsup.AWSCloud)
-
 	if err := t.AddOutputVariable("vpc_id", e.TerraformLink()); err != nil {
 		return err
 	}
@@ -213,7 +217,7 @@ func (_ *VPC) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *VPC) 
 
 	tf := &terraformVPC{
 		CIDR:               e.CIDR,
-		Tags:               cloud.BuildTags(e.Name),
+		Tags:               e.Tags,
 		EnableDNSHostnames: e.EnableDNSHostnames,
 		EnableDNSSupport:   e.EnableDNSSupport,
 	}
@@ -243,8 +247,6 @@ type cloudformationVPC struct {
 }
 
 func (_ *VPC) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *VPC) error {
-	cloud := t.Cloud.(awsup.AWSCloud)
-
 	shared := fi.BoolValue(e.Shared)
 	if shared {
 		// Not cloudformation owned / managed
@@ -255,7 +257,7 @@ func (_ *VPC) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e,
 		CidrBlock:          e.CIDR,
 		EnableDnsHostnames: e.EnableDNSHostnames,
 		EnableDnsSupport:   e.EnableDNSSupport,
-		Tags:               buildCloudformationTags(cloud.BuildTags(e.Name)),
+		Tags:               buildCloudformationTags(e.Tags),
 	}
 
 	return t.RenderResource("AWS::EC2::VPC", *e.Name, tf)

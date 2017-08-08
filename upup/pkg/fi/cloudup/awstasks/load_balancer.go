@@ -41,7 +41,8 @@ import (
 type LoadBalancer struct {
 	// We use the Name tag to find the existing ELB, because we are (more or less) unrestricted when
 	// it comes to tag values, but the LoadBalancerName is length limited
-	Name *string
+	Name      *string
+	Lifecycle *fi.Lifecycle
 
 	// LoadBalancerName is the name in ELB, possibly different from our name
 	// (ELB is restricted as to names, so we have limited choices!)
@@ -168,7 +169,7 @@ func findLoadBalancerByAlias(cloud awsup.AWSCloud, alias *route53.AliasTarget) (
 	return found[0], nil
 }
 
-func findLoadBalancerByNameTag(cloud awsup.AWSCloud, findNameTag string) (*elb.LoadBalancerDescription, error) {
+func FindLoadBalancerByNameTag(cloud awsup.AWSCloud, findNameTag string) (*elb.LoadBalancerDescription, error) {
 	// TODO: Any way around this?
 	glog.V(2).Infof("Listing all ELBs for findLoadBalancerByNameTag")
 
@@ -271,7 +272,7 @@ func describeLoadBalancerTags(cloud awsup.AWSCloud, loadBalancerNames []string) 
 func (e *LoadBalancer) Find(c *fi.Context) (*LoadBalancer, error) {
 	cloud := c.Cloud.(awsup.AWSCloud)
 
-	lb, err := findLoadBalancerByNameTag(cloud, fi.StringValue(e.Name))
+	lb, err := FindLoadBalancerByNameTag(cloud, fi.StringValue(e.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +387,26 @@ func (e *LoadBalancer) Find(c *fi.Context) (*LoadBalancer, error) {
 	actual.Normalize()
 
 	return actual, nil
+}
+
+var _ fi.HasAddress = &LoadBalancer{}
+
+func (e *LoadBalancer) FindIPAddress(context *fi.Context) (*string, error) {
+	cloud := context.Cloud.(awsup.AWSCloud)
+
+	lb, err := FindLoadBalancerByNameTag(cloud, fi.StringValue(e.Name))
+	if err != nil {
+		return nil, err
+	}
+	if lb == nil {
+		return nil, nil
+	}
+
+	lbDnsName := fi.StringValue(lb.DNSName)
+	if lbDnsName == "" {
+		return nil, nil
+	}
+	return &lbDnsName, nil
 }
 
 func (e *LoadBalancer) Run(c *fi.Context) error {

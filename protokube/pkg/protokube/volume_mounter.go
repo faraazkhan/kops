@@ -18,13 +18,15 @@ package protokube
 
 import (
 	"fmt"
-	"github.com/golang/glog"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/util/exec"
-	"k8s.io/kubernetes/pkg/util/mount"
 	"os"
 	"sort"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/exec"
+	"k8s.io/kubernetes/pkg/util/mount"
+
+	"github.com/golang/glog"
 )
 
 type VolumeMountController struct {
@@ -58,6 +60,17 @@ func (k *VolumeMountController) mountMasterVolumes() ([]*Volume, error) {
 		glog.V(2).Infof("Master volume %q is attached at %q", v.ID, v.LocalDevice)
 
 		mountpoint := "/mnt/master-" + v.ID
+
+		// On ContainerOS, we mount to /mnt/disks instead (/mnt is readonly)
+		_, err := os.Stat(pathFor("/mnt/disks"))
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("error checking for /mnt/disks: %v", err)
+			}
+		} else {
+			mountpoint = "/mnt/disks/master-" + v.ID
+		}
+
 		glog.Infof("Doing safe-format-and-mount of %s to %s", v.LocalDevice, mountpoint)
 		fstype := ""
 		err = k.safeFormatAndMount(v.LocalDevice, mountpoint, fstype)
@@ -81,9 +94,8 @@ func (k *VolumeMountController) mountMasterVolumes() ([]*Volume, error) {
 
 func (k *VolumeMountController) safeFormatAndMount(device string, mountpoint string, fstype string) error {
 	// Wait for the device to show up
-
 	for {
-		_, err := os.Stat(PathFor(device))
+		_, err := os.Stat(pathFor(device))
 		if err == nil {
 			break
 		}
@@ -94,16 +106,6 @@ func (k *VolumeMountController) safeFormatAndMount(device string, mountpoint str
 		time.Sleep(1 * time.Second)
 	}
 	glog.Infof("Found device %q", device)
-
-	//// Mount the device
-	//var mounter mount.Interface
-	//runner := exec.New()
-	//if k.Containerized {
-	//	mounter = mount.NewNsenterMounter()
-	//	runner = NewChrootRunner(runner, "/rootfs")
-	//} else {
-	//	mounter = mount.New()
-	//}
 
 	// If we are containerized, we still first SafeFormatAndMount in our namespace
 	// This is because SafeFormatAndMount doesn't seem to work in a container
@@ -117,7 +119,7 @@ func (k *VolumeMountController) safeFormatAndMount(device string, mountpoint str
 
 	// Note: IsLikelyNotMountPoint is not containerized
 
-	findMountpoint := PathFor(mountpoint)
+	findMountpoint := pathFor(mountpoint)
 	var existing []*mount.MountPoint
 	for i := range mounts {
 		m := &mounts[i]
@@ -132,17 +134,17 @@ func (k *VolumeMountController) safeFormatAndMount(device string, mountpoint str
 	//	options = append(options, "ro")
 	//}
 	if len(existing) == 0 {
-		glog.Infof("Creating mount directory %q", PathFor(mountpoint))
-		if err := os.MkdirAll(PathFor(mountpoint), 0750); err != nil {
+		glog.Infof("Creating mount directory %q", pathFor(mountpoint))
+		if err := os.MkdirAll(pathFor(mountpoint), 0750); err != nil {
 			return err
 		}
 
-		glog.Infof("Mounting device %q on %q", PathFor(device), PathFor(mountpoint))
+		glog.Infof("Mounting device %q on %q", pathFor(device), pathFor(mountpoint))
 
-		err = safeFormatAndMount.FormatAndMount(PathFor(device), PathFor(mountpoint), fstype, options)
+		err = safeFormatAndMount.FormatAndMount(pathFor(device), pathFor(mountpoint), fstype, options)
 		if err != nil {
 			//os.Remove(mountpoint)
-			return fmt.Errorf("error formatting and mounting disk %q on %q: %v", PathFor(device), PathFor(mountpoint), err)
+			return fmt.Errorf("error formatting and mounting disk %q on %q: %v", pathFor(device), pathFor(mountpoint), err)
 		}
 
 		// If we are containerized, we then also mount it into the host

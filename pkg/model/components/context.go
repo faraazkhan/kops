@@ -23,6 +23,7 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/util/pkg/vfs"
 	"math/big"
@@ -33,9 +34,22 @@ import (
 // OptionsContext is the context object for options builders
 type OptionsContext struct {
 	ClusterName string
+
+	KubernetesVersion semver.Version
+
+	AssetBuilder *assets.AssetBuilder
+}
+
+func (c *OptionsContext) IsKubernetesGTE(version string) bool {
+	return util.IsKubernetesGTE(version, c.KubernetesVersion)
+}
+
+func (c *OptionsContext) IsKubernetesLT(version string) bool {
+	return !c.IsKubernetesGTE(version)
 }
 
 // KubernetesVersion parses the semver version of kubernetes, from the cluster spec
+// Deprecated: prefer using OptionsContext.KubernetesVersion
 func KubernetesVersion(clusterSpec *kops.ClusterSpec) (*semver.Version, error) {
 	kubernetesVersion := clusterSpec.KubernetesVersion
 
@@ -61,13 +75,13 @@ func UsesKubenet(clusterSpec *kops.ClusterSpec) (bool, error) {
 	} else if networking.External != nil {
 		// external is based on kubenet
 		return true, nil
-	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil {
+	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
 		return false, nil
 	} else if networking.Kopeio != nil {
 		// Kopeio is based on kubenet / external
 		return true, nil
 	} else {
-		return false, fmt.Errorf("No networking mode set")
+		return false, fmt.Errorf("no networking mode set")
 	}
 }
 

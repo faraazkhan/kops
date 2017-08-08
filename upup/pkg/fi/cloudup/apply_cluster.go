@@ -22,20 +22,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blang/semver"
-	"github.com/golang/glog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kops"
-	api "k8s.io/kops/pkg/apis/kops"
+	kopsbase "k8s.io/kops"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/apis/kops/validation"
+	"k8s.io/kops/pkg/apis/nodeup"
+	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/pkg/client/simple"
+	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/awsmodel"
 	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/pkg/model/gcemodel"
+	"k8s.io/kops/pkg/model/vspheremodel"
+	"k8s.io/kops/pkg/templates"
+	"k8s.io/kops/upup/models"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
@@ -43,25 +47,36 @@ import (
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gcetasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
+	"k8s.io/kops/upup/pkg/fi/cloudup/vsphere"
+	"k8s.io/kops/upup/pkg/fi/cloudup/vspheretasks"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
-	"k8s.io/kops/upup/pkg/fi/nodeup"
 	"k8s.io/kops/util/pkg/hashing"
 	"k8s.io/kops/util/pkg/vfs"
+
+	"github.com/blang/semver"
+	"github.com/golang/glog"
 )
 
-const DefaultMaxTaskDuration = 10 * time.Minute
+const (
+	DefaultMaxTaskDuration = 10 * time.Minute
+	starline               = "*********************************************************************************\n"
+)
 
-const starline = "*********************************************************************************\n"
-
-// AlphaAllowGCE is a feature flag that gates GCE support while it is alpha
-var AlphaAllowGCE = featureflag.New("AlphaAllowGCE", featureflag.Bool(false))
-
-var CloudupModels = []string{"config", "proto", "cloudup"}
+var (
+	// AlphaAllowDO is a feature flag that gates DigitalOcean support while it is alpha
+	AlphaAllowDO = featureflag.New("AlphaAllowDO", featureflag.Bool(false))
+	// AlphaAllowGCE is a feature flag that gates GCE support while it is alpha
+	AlphaAllowGCE = featureflag.New("AlphaAllowGCE", featureflag.Bool(false))
+	// AlphaAllowVsphere is a feature flag that gates vsphere support while it is alpha
+	AlphaAllowVsphere = featureflag.New("AlphaAllowVsphere", featureflag.Bool(false))
+	// CloudupModels a list of supported models
+	CloudupModels = []string{"config", "proto", "cloudup"}
+)
 
 type ApplyClusterCmd struct {
-	Cluster *api.Cluster
+	Cluster *kops.Cluster
 
-	InstanceGroups []*api.InstanceGroup
+	InstanceGroups []*kops.InstanceGroup
 
 	// NodeUpSource is the location from which we download nodeup
 	NodeUpSource string
@@ -92,7 +107,10 @@ type ApplyClusterCmd struct {
 	MaxTaskDuration time.Duration
 
 	// The channel we are using
-	channel *api.Channel
+	channel *kops.Channel
+
+	// Phase can be set to a Phase to run the specific subset of tasks, if we don't want to run everything
+	Phase Phase
 }
 
 func (c *ApplyClusterCmd) Run() error {
@@ -101,11 +119,11 @@ func (c *ApplyClusterCmd) Run() error {
 	}
 
 	if c.InstanceGroups == nil {
-		list, err := c.Clientset.InstanceGroups(c.Cluster.ObjectMeta.Name).List(metav1.ListOptions{})
+		list, err := c.Clientset.InstanceGroupsFor(c.Cluster).List(metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
-		var instanceGroups []*api.InstanceGroup
+		var instanceGroups []*kops.InstanceGroup
 		for i := range list.Items {
 			instanceGroups = append(instanceGroups, &list.Items[i])
 		}
@@ -127,7 +145,8 @@ func (c *ApplyClusterCmd) Run() error {
 	}
 	c.channel = channel
 
-	err = c.upgradeSpecs()
+	assetBuilder := assets.NewAssetBuilder()
+	err = c.upgradeSpecs(assetBuilder)
 	if err != nil {
 		return err
 	}
@@ -152,7 +171,7 @@ func (c *ApplyClusterCmd) Run() error {
 	if cluster.Spec.KubernetesVersion == "" {
 		return fmt.Errorf("KubernetesVersion not set")
 	}
-	if cluster.Spec.DNSZone == "" {
+	if cluster.Spec.DNSZone == "" && !dns.IsGossipHostname(cluster.ObjectMeta.Name) {
 		return fmt.Errorf("DNSZone not set")
 	}
 
@@ -222,8 +241,18 @@ func (c *ApplyClusterCmd) Run() error {
 		}
 
 		if usesCNI(cluster) {
-			cniAsset, cniAssetHashString := findCNIAssets(cluster)
-			c.Assets = append(c.Assets, cniAssetHashString+"@"+cniAsset)
+			cniAsset, cniAssetHashString, err := findCNIAssets(cluster)
+
+			if err != nil {
+				return err
+			}
+
+			if cniAssetHashString == "" {
+				glog.Warningf("cniAssetHashString is empty, using cniAsset directly: %s", cniAsset)
+				c.Assets = append(c.Assets, cniAsset)
+			} else {
+				c.Assets = append(c.Assets, cniAssetHashString+"@"+cniAsset)
+			}
 		}
 
 		if needsStaticUtils(cluster, c.InstanceGroups) {
@@ -248,9 +277,6 @@ func (c *ApplyClusterCmd) Run() error {
 		"keypair":     &fitasks.Keypair{},
 		"secret":      &fitasks.Secret{},
 		"managedFile": &fitasks.ManagedFile{},
-
-		// DNS
-		//"dnsZone": &dnstasks.DNSZone{},
 	})
 
 	cloud, err := BuildCloud(cluster)
@@ -278,8 +304,8 @@ func (c *ApplyClusterCmd) Run() error {
 		InstanceGroups: c.InstanceGroups,
 	}
 
-	switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
-	case fi.CloudProviderGCE:
+	switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+	case kops.CloudProviderGCE:
 		{
 			gceCloud := cloud.(*gce.GCECloud)
 			region = gceCloud.Region
@@ -290,17 +316,26 @@ func (c *ApplyClusterCmd) Run() error {
 			}
 
 			l.AddTypes(map[string]interface{}{
-				"persistentDisk":       &gcetasks.PersistentDisk{},
-				"instance":             &gcetasks.Instance{},
-				"instanceTemplate":     &gcetasks.InstanceTemplate{},
-				"network":              &gcetasks.Network{},
-				"managedInstanceGroup": &gcetasks.ManagedInstanceGroup{},
-				"firewallRule":         &gcetasks.FirewallRule{},
-				"ipAddress":            &gcetasks.IPAddress{},
+				"Disk":                 &gcetasks.Disk{},
+				"Instance":             &gcetasks.Instance{},
+				"InstanceTemplate":     &gcetasks.InstanceTemplate{},
+				"Network":              &gcetasks.Network{},
+				"InstanceGroupManager": &gcetasks.InstanceGroupManager{},
+				"FirewallRule":         &gcetasks.FirewallRule{},
+				"Address":              &gcetasks.Address{},
 			})
 		}
 
-	case fi.CloudProviderAWS:
+	case kops.CloudProviderDO:
+		{
+			if !AlphaAllowDO.Enabled() {
+				return fmt.Errorf("DigitalOcean support is currently (very) alpha and is feature-gated. export KOPS_FEATURE_FLAGS=AlphaAllowDO to enable it")
+			}
+
+			// this is a no-op for now, add tasks to this list as more DO support is added
+			l.AddTypes(map[string]interface{}{})
+		}
+	case kops.CloudProviderAWS:
 		{
 			awsCloud := cloud.(awsup.AWSCloud)
 			region = awsCloud.Region()
@@ -340,10 +375,6 @@ func (c *ApplyClusterCmd) Run() error {
 				// Autoscaling
 				"autoscalingGroup":    &awstasks.AutoscalingGroup{},
 				"launchConfiguration": &awstasks.LaunchConfiguration{},
-
-				//// Route53
-				//"dnsName": &awstasks.DNSName{},
-				//"dnsZone": &awstasks.DNSZone{},
 			})
 
 			if len(sshPublicKeys) == 0 {
@@ -359,21 +390,35 @@ func (c *ApplyClusterCmd) Run() error {
 			l.TemplateFunctions["MachineTypeInfo"] = awsup.GetMachineTypeInfo
 		}
 
+	case kops.CloudProviderVSphere:
+		{
+			if !AlphaAllowVsphere.Enabled() {
+				return fmt.Errorf("Vsphere support is currently alpha, and is feature-gated.  export KOPS_FEATURE_FLAGS=AlphaAllowVsphere")
+			}
+
+			vsphereCloud := cloud.(*vsphere.VSphereCloud)
+			// TODO: map region with vCenter cluster, or datacenter, or datastore?
+			region = vsphereCloud.Cluster
+
+			l.AddTypes(map[string]interface{}{
+				"instance": &vspheretasks.VirtualMachine{},
+			})
+		}
+
 	default:
 		return fmt.Errorf("unknown CloudProvider %q", cluster.Spec.CloudProvider)
 	}
 
 	modelContext.Region = region
 
-	err = validateDNS(cluster, cloud)
-	if err != nil {
-		return err
+	if dns.IsGossipHostname(cluster.ObjectMeta.Name) {
+		glog.Infof("Gossip DNS: skipping DNS validation")
+	} else {
+		err = validateDNS(cluster, cloud)
+		if err != nil {
+			return err
+		}
 	}
-	dnszone, err := findZone(cluster, cloud)
-	if err != nil {
-		return err
-	}
-	modelContext.HostedZoneID = dnszone.ID()
 
 	clusterTags, err := buildCloudupTags(cluster)
 	if err != nil {
@@ -392,6 +437,34 @@ func (c *ApplyClusterCmd) Run() error {
 	l.WorkDir = c.OutDir
 	l.ModelStore = modelStore
 
+	iamLifecycle := lifecyclePointer(fi.LifecycleSync)
+	networkLifecycle := lifecyclePointer(fi.LifecycleSync)
+	clusterLifecycle := lifecyclePointer(fi.LifecycleSync)
+
+	switch c.Phase {
+	case Phase(""):
+	// Everything ... the default
+
+	case PhaseIAM:
+		networkLifecycle = lifecyclePointer(fi.LifecycleIgnore)
+		clusterLifecycle = lifecyclePointer(fi.LifecycleIgnore)
+
+	case PhaseNetwork:
+		iamLifecycle = lifecyclePointer(fi.LifecycleIgnore)
+		clusterLifecycle = lifecyclePointer(fi.LifecycleIgnore)
+
+	case PhaseCluster:
+		if c.TargetName == TargetDryRun {
+			iamLifecycle = lifecyclePointer(fi.LifecycleExistsAndWarnIfChanges)
+			networkLifecycle = lifecyclePointer(fi.LifecycleExistsAndWarnIfChanges)
+		} else {
+			iamLifecycle = lifecyclePointer(fi.LifecycleExistsAndValidates)
+			networkLifecycle = lifecyclePointer(fi.LifecycleExistsAndValidates)
+		}
+	default:
+		return fmt.Errorf("unknown phase %q", c.Phase)
+	}
+
 	var fileModels []string
 	for _, m := range c.Models {
 		switch m {
@@ -399,42 +472,63 @@ func (c *ApplyClusterCmd) Run() error {
 		// No proto code options; no file model
 
 		case "cloudup":
+			templates, err := templates.LoadTemplates(cluster, models.NewAssetPath("cloudup/resources"))
+			if err != nil {
+				return fmt.Errorf("error loading templates: %v", err)
+			}
+			tf.AddTo(templates.TemplateFunctions)
+
 			l.Builders = append(l.Builders,
-				&BootstrapChannelBuilder{cluster: cluster},
+				&BootstrapChannelBuilder{
+					cluster:      cluster,
+					Lifecycle:    clusterLifecycle,
+					templates:    templates,
+					assetBuilder: assetBuilder,
+				},
+				&model.PKIModelBuilder{KopsModelContext: modelContext, Lifecycle: clusterLifecycle},
 			)
 
-			switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
-			case fi.CloudProviderAWS:
+			switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+			case kops.CloudProviderAWS:
+				awsModelContext := &awsmodel.AWSModelContext{
+					KopsModelContext: modelContext,
+				}
+
 				l.Builders = append(l.Builders,
-					&model.APILoadBalancerBuilder{KopsModelContext: modelContext},
-					&model.BastionModelBuilder{KopsModelContext: modelContext},
-					&model.DNSModelBuilder{KopsModelContext: modelContext},
-					&model.ExternalAccessModelBuilder{KopsModelContext: modelContext},
-					&model.FirewallModelBuilder{KopsModelContext: modelContext},
-					&model.IAMModelBuilder{KopsModelContext: modelContext},
-					&model.PKIModelBuilder{KopsModelContext: modelContext},
-					&model.MasterVolumeBuilder{KopsModelContext: modelContext},
-					&model.NetworkModelBuilder{KopsModelContext: modelContext},
-					&model.SSHKeyModelBuilder{KopsModelContext: modelContext},
+					&model.MasterVolumeBuilder{KopsModelContext: modelContext, Lifecycle: clusterLifecycle},
+
+					&awsmodel.APILoadBalancerBuilder{AWSModelContext: awsModelContext, Lifecycle: networkLifecycle},
+					&model.BastionModelBuilder{KopsModelContext: modelContext, Lifecycle: networkLifecycle},
+					&model.DNSModelBuilder{KopsModelContext: modelContext, Lifecycle: networkLifecycle},
+					&model.ExternalAccessModelBuilder{KopsModelContext: modelContext, Lifecycle: clusterLifecycle},
+					&model.FirewallModelBuilder{KopsModelContext: modelContext, Lifecycle: clusterLifecycle},
+					&model.SSHKeyModelBuilder{KopsModelContext: modelContext, Lifecycle: iamLifecycle},
 				)
 
-			case fi.CloudProviderGCE:
+				l.Builders = append(l.Builders,
+					&model.NetworkModelBuilder{KopsModelContext: modelContext, Lifecycle: networkLifecycle},
+				)
+
+				l.Builders = append(l.Builders,
+					&model.IAMModelBuilder{KopsModelContext: modelContext, Lifecycle: iamLifecycle},
+				)
+
+			case kops.CloudProviderGCE:
 				gceModelContext := &gcemodel.GCEModelContext{
 					KopsModelContext: modelContext,
 				}
 
 				l.Builders = append(l.Builders,
-					//&model.APILoadBalancerBuilder{KopsModelContext: modelContext},
-					//&model.BastionModelBuilder{KopsModelContext: modelContext},
-					//&model.DNSModelBuilder{KopsModelContext: modelContext},
-					&gcemodel.ExternalAccessModelBuilder{GCEModelContext: gceModelContext},
-					&gcemodel.FirewallModelBuilder{GCEModelContext: gceModelContext},
-					//&model.IAMModelBuilder{KopsModelContext: modelContext},
-					&model.PKIModelBuilder{KopsModelContext: modelContext},
-					&model.MasterVolumeBuilder{KopsModelContext: modelContext},
-					&gcemodel.NetworkModelBuilder{GCEModelContext: gceModelContext},
-					//&model.SSHKeyModelBuilder{KopsModelContext: modelContext},
+					&model.MasterVolumeBuilder{KopsModelContext: modelContext, Lifecycle: clusterLifecycle},
+
+					&gcemodel.APILoadBalancerBuilder{GCEModelContext: gceModelContext, Lifecycle: networkLifecycle},
+					&gcemodel.ExternalAccessModelBuilder{GCEModelContext: gceModelContext, Lifecycle: networkLifecycle},
+					&gcemodel.FirewallModelBuilder{GCEModelContext: gceModelContext, Lifecycle: networkLifecycle},
+					&gcemodel.NetworkModelBuilder{GCEModelContext: gceModelContext, Lifecycle: networkLifecycle},
 				)
+
+			case kops.CloudProviderVSphere:
+				// No special settings (yet!)
 
 			default:
 				return fmt.Errorf("unknown cloudprovider %q", cluster.Spec.CloudProvider)
@@ -455,7 +549,8 @@ func (c *ApplyClusterCmd) Run() error {
 	}
 
 	// RenderNodeUpConfig returns the NodeUp config, in YAML format
-	renderNodeUpConfig := func(ig *api.InstanceGroup) (*nodeup.NodeUpConfig, error) {
+	// @@NOTE
+	renderNodeUpConfig := func(ig *kops.InstanceGroup) (*nodeup.Config, error) {
 		if ig == nil {
 			return nil, fmt.Errorf("instanceGroup cannot be nil")
 		}
@@ -470,17 +565,14 @@ func (c *ApplyClusterCmd) Run() error {
 			return nil, err
 		}
 
-		config := &nodeup.NodeUpConfig{}
+		config := &nodeup.Config{}
 		for _, tag := range nodeUpTags.List() {
 			config.Tags = append(config.Tags, tag)
 		}
 
 		config.Assets = c.Assets
-
 		config.ClusterName = cluster.ObjectMeta.Name
-
 		config.ConfigBase = fi.String(configBase.Path())
-
 		config.InstanceGroupName = ig.ObjectMeta.Name
 
 		var images []*nodeup.Image
@@ -492,7 +584,7 @@ func (c *ApplyClusterCmd) Run() error {
 			// TODO: pull kube-dns image
 			// When using a custom version, we want to preload the images over http
 			components := []string{"kube-proxy"}
-			if role == api.InstanceGroupRoleMaster {
+			if role == kops.InstanceGroupRoleMaster {
 				components = append(components, "kube-apiserver", "kube-controller-manager", "kube-scheduler")
 			}
 			for _, component := range components {
@@ -520,7 +612,7 @@ func (c *ApplyClusterCmd) Run() error {
 			}
 
 			config.ProtokubeImage = &nodeup.Image{
-				Name:   kops.DefaultProtokubeImageName(),
+				Name:   kopsbase.DefaultProtokubeImageName(),
 				Source: location,
 				Hash:   hash.Hex(),
 			}
@@ -537,8 +629,8 @@ func (c *ApplyClusterCmd) Run() error {
 		NodeUpSourceHash:    "",
 		NodeUpSource:        c.NodeUpSource,
 	}
-	switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
-	case fi.CloudProviderAWS:
+	switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+	case kops.CloudProviderAWS:
 		awsModelContext := &awsmodel.AWSModelContext{
 			KopsModelContext: modelContext,
 		}
@@ -546,9 +638,10 @@ func (c *ApplyClusterCmd) Run() error {
 		l.Builders = append(l.Builders, &awsmodel.AutoscalingGroupModelBuilder{
 			AWSModelContext: awsModelContext,
 			BootstrapScript: bootstrapScriptBuilder,
+			Lifecycle:       clusterLifecycle,
 		})
 
-	case fi.CloudProviderGCE:
+	case kops.CloudProviderGCE:
 		{
 			gceModelContext := &gcemodel.GCEModelContext{
 				KopsModelContext: modelContext,
@@ -557,6 +650,19 @@ func (c *ApplyClusterCmd) Run() error {
 			l.Builders = append(l.Builders, &gcemodel.AutoscalingGroupModelBuilder{
 				GCEModelContext: gceModelContext,
 				BootstrapScript: bootstrapScriptBuilder,
+				Lifecycle:       clusterLifecycle,
+			})
+		}
+	case kops.CloudProviderVSphere:
+		{
+			vsphereModelContext := &vspheremodel.VSphereModelContext{
+				KopsModelContext: modelContext,
+			}
+
+			l.Builders = append(l.Builders, &vspheremodel.AutoscalingGroupModelBuilder{
+				VSphereModelContext: vsphereModelContext,
+				BootstrapScript:     bootstrapScriptBuilder,
+				Lifecycle:           clusterLifecycle,
 			})
 		}
 
@@ -564,32 +670,11 @@ func (c *ApplyClusterCmd) Run() error {
 		return fmt.Errorf("unknown cloudprovider %q", cluster.Spec.CloudProvider)
 	}
 
-	//// TotalNodeCount computes the total count of nodes
-	//l.TemplateFunctions["TotalNodeCount"] = func() (int, error) {
-	//	count := 0
-	//	for _, group := range c.InstanceGroups {
-	//		if group.IsMaster() {
-	//			continue
-	//		}
-	//		if group.Spec.MaxSize != nil {
-	//			count += *group.Spec.MaxSize
-	//		} else if group.Spec.MinSize != nil {
-	//			count += *group.Spec.MinSize
-	//		} else {
-	//			// Guestimate
-	//			count += 5
-	//		}
-	//	}
-	//	return count, nil
-	//}
-	l.TemplateFunctions["Region"] = func() string {
-		return region
-	}
 	l.TemplateFunctions["Masters"] = tf.modelContext.MasterInstanceGroups
 
 	tf.AddTo(l.TemplateFunctions)
 
-	taskMap, err := l.BuildTasks(modelStore, fileModels)
+	taskMap, err := l.BuildTasks(modelStore, fileModels, assetBuilder)
 	if err != nil {
 		return fmt.Errorf("error building tasks: %v", err)
 	}
@@ -605,6 +690,8 @@ func (c *ApplyClusterCmd) Run() error {
 			target = gce.NewGCEAPITarget(cloud.(*gce.GCECloud))
 		case "aws":
 			target = awsup.NewAWSAPITarget(cloud.(awsup.AWSCloud))
+		case "vsphere":
+			target = vsphere.NewVSphereAPITarget(cloud.(*vsphere.VSphereCloud))
 		default:
 			return fmt.Errorf("direct configuration not supported with CloudProvider:%q", cluster.Spec.CloudProvider)
 		}
@@ -643,7 +730,7 @@ func (c *ApplyClusterCmd) Run() error {
 		shouldPrecreateDNS = false
 
 	case TargetDryRun:
-		target = fi.NewDryRunTarget(os.Stdout)
+		target = fi.NewDryRunTarget(assetBuilder, os.Stdout)
 		dryRun = true
 
 		// Avoid making changes on a dry-run
@@ -661,7 +748,7 @@ func (c *ApplyClusterCmd) Run() error {
 		}
 
 		for _, g := range c.InstanceGroups {
-			_, err := c.Clientset.InstanceGroups(c.Cluster.ObjectMeta.Name).Update(g)
+			_, err := c.Clientset.InstanceGroupsFor(c.Cluster).Update(g)
 			if err != nil {
 				return fmt.Errorf("error writing InstanceGroup %q to registry: %v", g.ObjectMeta.Name, err)
 			}
@@ -677,6 +764,10 @@ func (c *ApplyClusterCmd) Run() error {
 	err = context.RunTasks(c.MaxTaskDuration)
 	if err != nil {
 		return fmt.Errorf("error running tasks: %v", err)
+	}
+
+	if dns.IsGossipHostname(cluster.Name) {
+		shouldPrecreateDNS = false
 	}
 
 	if shouldPrecreateDNS {
@@ -710,13 +801,8 @@ func findHash(url string) (*hashing.Hash, error) {
 }
 
 // upgradeSpecs ensures that fields are fully populated / defaulted
-func (c *ApplyClusterCmd) upgradeSpecs() error {
-	//err := c.Cluster.PerformAssignments()
-	//if err != nil {
-	//	return fmt.Errorf("error populating configuration: %v", err)
-	//}
-
-	fullCluster, err := PopulateClusterSpec(c.Cluster)
+func (c *ApplyClusterCmd) upgradeSpecs(assetBuilder *assets.AssetBuilder) error {
+	fullCluster, err := PopulateClusterSpec(c.Cluster, assetBuilder)
 	if err != nil {
 		return err
 	}
@@ -735,14 +821,14 @@ func (c *ApplyClusterCmd) upgradeSpecs() error {
 
 // validateKopsVersion ensures that kops meet the version requirements / recommendations in the channel
 func (c *ApplyClusterCmd) validateKopsVersion() error {
-	kopsVersion, err := semver.ParseTolerant(kops.Version)
+	kopsVersion, err := semver.ParseTolerant(kopsbase.Version)
 	if err != nil {
-		glog.Warningf("unable to parse kops version %q", kops.Version)
+		glog.Warningf("unable to parse kops version %q", kopsbase.Version)
 		// Not a hard-error
 		return nil
 	}
 
-	versionInfo := api.FindKopsVersionSpec(c.channel.Spec.KopsVersions, kopsVersion)
+	versionInfo := kops.FindKopsVersionSpec(c.channel.Spec.KopsVersions, kopsVersion)
 	if versionInfo == nil {
 		glog.Warningf("unable to find version information for kops version %q in channel", kopsVersion)
 		// Not a hard-error
@@ -808,7 +894,7 @@ func (c *ApplyClusterCmd) validateKubernetesVersion() error {
 	// TODO: make util.ParseKubernetesVersion not return a pointer
 	kubernetesVersion := *parsed
 
-	versionInfo := api.FindKubernetesVersionSpec(c.channel.Spec.KubernetesVersions, kubernetesVersion)
+	versionInfo := kops.FindKubernetesVersionSpec(c.channel.Spec.KubernetesVersions, kubernetesVersion)
 	if versionInfo == nil {
 		glog.Warningf("unable to find version information for kubernetes version %q in channel", kubernetesVersion)
 		// Not a hard-error
@@ -871,17 +957,21 @@ func buildPermalink(key, anchor string) string {
 	return url
 }
 
-func ChannelForCluster(c *api.Cluster) (*api.Channel, error) {
+func ChannelForCluster(c *kops.Cluster) (*kops.Channel, error) {
 	channelLocation := c.Spec.Channel
 	if channelLocation == "" {
-		channelLocation = api.DefaultChannel
+		channelLocation = kops.DefaultChannel
 	}
-	return api.LoadChannel(channelLocation)
+	return kops.LoadChannel(channelLocation)
 }
 
 // needsStaticUtils checks if we need our static utils on this OS.
 // This is only needed currently on CoreOS, but we don't have a nice way to detect it yet
-func needsStaticUtils(c *api.Cluster, instanceGroups []*api.InstanceGroup) bool {
+func needsStaticUtils(c *kops.Cluster, instanceGroups []*kops.InstanceGroup) bool {
 	// TODO: Do real detection of CoreOS (but this has to work with AMI names, and maybe even forked AMIs)
 	return true
+}
+
+func lifecyclePointer(v fi.Lifecycle) *fi.Lifecycle {
+	return &v
 }

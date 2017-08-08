@@ -198,6 +198,13 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		Cores:          40,
 		EphemeralDisks: nil,
 	},
+	{
+		Name:           "m4.16xlarge",
+		MemoryGB:       256,
+		ECU:            188,
+		Cores:          64,
+		EphemeralDisks: nil,
+	},
 
 	// c3 family
 	{
@@ -550,6 +557,32 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 	{
 		Name:           "p2.16xlarge",
 		MemoryGB:       732,
+		ECU:            188,
+		Cores:          64,
+		EphemeralDisks: nil,
+		GPU:            true,
+	},
+
+	// g3 family
+	{
+		Name:           "g3.4xlarge",
+		MemoryGB:       122,
+		Cores:          16,
+		ECU:            47,
+		EphemeralDisks: nil,
+		GPU:            true,
+	},
+	{
+		Name:           "g3.8xlarge",
+		MemoryGB:       244,
+		ECU:            94,
+		Cores:          32,
+		EphemeralDisks: nil,
+		GPU:            true,
+	},
+	{
+		Name:           "g3.16xlarge",
+		MemoryGB:       488,
 		ECU:            188,
 		Cores:          64,
 		EphemeralDisks: nil,

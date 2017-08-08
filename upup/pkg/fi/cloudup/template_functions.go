@@ -30,19 +30,22 @@ package cloudup
 import (
 	"encoding/base64"
 	"fmt"
-	"k8s.io/apimachinery/pkg/util/sets"
-	api "k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/model"
-	"k8s.io/kops/pkg/model/components"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"os"
+	"strconv"
 	"strings"
 	"text/template"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/dns"
+	"k8s.io/kops/pkg/model"
+	"k8s.io/kops/pkg/model/components"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 )
 
 type TemplateFunctions struct {
-	cluster        *api.Cluster
-	instanceGroups []*api.InstanceGroup
+	cluster        *kops.Cluster
+	instanceGroups []*kops.InstanceGroup
 
 	tags   sets.String
 	region string
@@ -86,15 +89,22 @@ func (tf *TemplateFunctions) AddTo(dest template.FuncMap) {
 
 	dest["CloudTags"] = tf.modelContext.CloudTagsForInstanceGroup
 
-	dest["KubeDNS"] = func() *api.KubeDNSConfig {
+	dest["KubeDNS"] = func() *kops.KubeDNSConfig {
 		return tf.cluster.Spec.KubeDNS
 	}
 
 	dest["DnsControllerArgv"] = tf.DnsControllerArgv
 
+	dest["ExternalDnsArgv"] = tf.ExternalDnsArgv
+
 	// TODO: Only for GCE?
 	dest["EncodeGCELabel"] = gce.EncodeGCELabel
 
+	dest["Region"] = func() string {
+		return tf.region
+	}
+
+	dest["ProxyEnv"] = tf.ProxyEnv
 }
 
 // SharedVPC is a simple helper function which makes the templates for a shared VPC clearer
@@ -114,7 +124,7 @@ func (tf *TemplateFunctions) HasTag(tag string) bool {
 }
 
 // GetInstanceGroup returns the instance group with the specified name
-func (tf *TemplateFunctions) GetInstanceGroup(name string) (*api.InstanceGroup, error) {
+func (tf *TemplateFunctions) GetInstanceGroup(name string) (*kops.InstanceGroup, error) {
 	for _, ig := range tf.instanceGroups {
 		if ig.ObjectMeta.Name == name {
 			return ig, nil
@@ -130,14 +140,25 @@ func (tf *TemplateFunctions) DnsControllerArgv() ([]string, error) {
 
 	argv = append(argv, "--watch-ingress=false")
 
-	switch fi.CloudProviderID(tf.cluster.Spec.CloudProvider) {
-	case fi.CloudProviderAWS:
-		argv = append(argv, "--dns=aws-route53")
-	case fi.CloudProviderGCE:
+	switch kops.CloudProviderID(tf.cluster.Spec.CloudProvider) {
+	case kops.CloudProviderAWS:
+		if strings.HasPrefix(os.Getenv("AWS_REGION"), "cn-") {
+			argv = append(argv, "--dns=gossip")
+		} else {
+			argv = append(argv, "--dns=aws-route53")
+		}
+	case kops.CloudProviderGCE:
 		argv = append(argv, "--dns=google-clouddns")
+	case kops.CloudProviderVSphere:
+		argv = append(argv, "--dns=coredns")
+		argv = append(argv, "--dns-server="+*tf.cluster.Spec.CloudConfig.VSphereCoreDNSServer)
 
 	default:
 		return nil, fmt.Errorf("unhandled cloudprovider %q", tf.cluster.Spec.CloudProvider)
+	}
+
+	if dns.IsGossipHostname(tf.cluster.Spec.MasterInternalName) {
+		argv = append(argv, "--gossip-seed=127.0.0.1:3999")
 	}
 
 	zone := tf.cluster.Spec.DNSZone
@@ -157,4 +178,50 @@ func (tf *TemplateFunctions) DnsControllerArgv() ([]string, error) {
 	argv = append(argv, "-v=2")
 
 	return argv, nil
+}
+
+func (tf *TemplateFunctions) ExternalDnsArgv() ([]string, error) {
+	var argv []string
+
+	cloudProvider := tf.cluster.Spec.CloudProvider
+
+	switch kops.CloudProviderID(cloudProvider) {
+	case kops.CloudProviderAWS:
+		argv = append(argv, "--provider=aws")
+	case kops.CloudProviderGCE:
+		project := tf.cluster.Spec.Project
+		argv = append(argv, "--provider=google")
+		argv = append(argv, "--google-project="+project)
+	default:
+		return nil, fmt.Errorf("unhandled cloudprovider %q", tf.cluster.Spec.CloudProvider)
+	}
+
+	argv = append(argv, "--source=ingress")
+
+	return argv, nil
+}
+
+func (tf *TemplateFunctions) ProxyEnv() map[string]string {
+	envs := map[string]string{}
+	proxies := tf.cluster.Spec.EgressProxy
+	if proxies == nil {
+		return envs
+	}
+	httpProxy := proxies.HTTPProxy
+	if httpProxy.Host != "" {
+		var portSuffix string
+		if httpProxy.Port != 0 {
+			portSuffix = ":" + strconv.Itoa(httpProxy.Port)
+		} else {
+			portSuffix = ""
+		}
+		url := "http://" + httpProxy.Host + portSuffix
+		envs["http_proxy"] = url
+		envs["https_proxy"] = url
+	}
+	if proxies.ProxyExcludes != "" {
+		envs["no_proxy"] = proxies.ProxyExcludes
+		envs["NO_PROXY"] = proxies.ProxyExcludes
+	}
+	return envs
 }

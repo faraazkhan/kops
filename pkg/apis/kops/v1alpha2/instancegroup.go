@@ -20,10 +20,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +genclient=true
+
 // InstanceGroup represents a group of instances (either nodes or masters) with the same configuration
 type InstanceGroup struct {
-	metav1.TypeMeta `json:",inline"`
-	ObjectMeta      metav1.ObjectMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec InstanceGroupSpec `json:"spec,omitempty"`
 }
@@ -66,7 +68,12 @@ type InstanceGroupSpec struct {
 	RootVolumeSize *int32 `json:"rootVolumeSize,omitempty"`
 	// RootVolumeType is the type of the EBS root volume to use (e.g. gp2)
 	RootVolumeType *string `json:"rootVolumeType,omitempty"`
+	// If volume type is io1, then we need to specify the number of Iops.
+	RootVolumeIops *int32 `json:"rootVolumeIops,omitempty"`
+	// RootVolumeOptimization enables EBS optimization for an instance
+	RootVolumeOptimization *bool `json:"rootVolumeOptimization,omitempty"`
 
+	// Subnets is the names of the Subnets (as specified in the Cluster) where machines in this instance group should be placed
 	Subnets []string `json:"subnets,omitempty"`
 
 	// MaxPrice indicates this is a spot-pricing group, with the specified value as our max-price bid
@@ -83,4 +90,14 @@ type InstanceGroupSpec struct {
 
 	// NodeLabels indicates the kubernetes labels for nodes in this group
 	NodeLabels map[string]string `json:"nodeLabels,omitempty"`
+
+	// Describes the tenancy of the instance group. Can be either default or dedicated.
+	// Currently only applies to AWS.
+	Tenancy string `json:"tenancy,omitempty"`
+
+	// Kubelet overrides kubelet config from the ClusterSpec
+	Kubelet *KubeletConfigSpec `json:"kubelet,omitempty"`
+
+	// Taints indicates the kubernetes taints for nodes in this group
+	Taints []string `json:"taints,omitempty"`
 }

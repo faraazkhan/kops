@@ -18,14 +18,15 @@ package model
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gcetasks"
-	"sort"
-	"strings"
 )
 
 const (
@@ -37,6 +38,7 @@ const (
 // MasterVolumeBuilder builds master EBS volumes
 type MasterVolumeBuilder struct {
 	*KopsModelContext
+	Lifecycle *fi.Lifecycle
 }
 
 var _ fi.ModelBuilder = &MasterVolumeBuilder{}
@@ -83,11 +85,13 @@ func (b *MasterVolumeBuilder) Build(c *fi.ModelBuilderContext) error {
 			}
 			sort.Strings(allMembers)
 
-			switch fi.CloudProviderID(b.Cluster.Spec.CloudProvider) {
-			case fi.CloudProviderAWS:
+			switch kops.CloudProviderID(b.Cluster.Spec.CloudProvider) {
+			case kops.CloudProviderAWS:
 				b.addAWSVolume(c, name, volumeSize, subnet, etcd, m, allMembers)
-			case fi.CloudProviderGCE:
+			case kops.CloudProviderGCE:
 				b.addGCEVolume(c, name, volumeSize, subnet, etcd, m, allMembers)
+			case kops.CloudProviderVSphere:
+				b.addVSphereVolume(c, name, volumeSize, subnet, etcd, m, allMembers)
 			default:
 				return fmt.Errorf("unknown cloudprovider %q", b.Cluster.Spec.CloudProvider)
 			}
@@ -104,6 +108,12 @@ func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name strin
 
 	// The tags are how protokube knows to mount the volume and use it for etcd
 	tags := make(map[string]string)
+
+	// Apply all user defined labels on the volumes
+	for k, v := range b.Cluster.Spec.CloudLabels {
+		tags[k] = v
+	}
+
 	//tags[awsup.TagClusterName] = b.C.cluster.Name
 	// This is the configuration of the etcd cluster
 	tags[awsup.TagNameEtcdClusterPrefix+etcd.Name] = m.Name + "/" + strings.Join(allMembers, ",")
@@ -113,7 +123,9 @@ func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name strin
 	encrypted := fi.BoolValue(m.EncryptedVolume)
 
 	t := &awstasks.EBSVolume{
-		Name:             s(name),
+		Name:      s(name),
+		Lifecycle: b.Lifecycle,
+
 		AvailabilityZone: s(subnet.Zone),
 		SizeGB:           fi.Int64(int64(volumeSize)),
 		VolumeType:       s(volumeType),
@@ -136,7 +148,7 @@ func (b *MasterVolumeBuilder) addGCEVolume(c *fi.ModelBuilderContext, name strin
 	//// The name is normally something like "us-east1-a", and the dashes are particularly expensive
 	//// because of the escaping needed (3 characters for each dash)
 	//switch tf.cluster.Spec.CloudProvider {
-	//case string(fi.CloudProviderGCE):
+	//case string(kops.CloudProviderGCE):
 	//	// TODO: If we're still struggling for size, we don't need to put ourselves in the allmembers list
 	//	for i := range allMembers {
 	//		allMembers[i] = strings.Replace(allMembers[i], "-", "", -1)
@@ -155,8 +167,10 @@ func (b *MasterVolumeBuilder) addGCEVolume(c *fi.ModelBuilderContext, name strin
 
 	name = strings.Replace(name, ".", "-", -1)
 
-	t := &gcetasks.PersistentDisk{
-		Name:       s(name),
+	t := &gcetasks.Disk{
+		Name:      s(name),
+		Lifecycle: b.Lifecycle,
+
 		Zone:       s(subnet.Zone),
 		SizeGB:     fi.Int64(int64(volumeSize)),
 		VolumeType: s(volumeType),
@@ -164,4 +178,8 @@ func (b *MasterVolumeBuilder) addGCEVolume(c *fi.ModelBuilderContext, name strin
 	}
 
 	c.AddTask(t)
+}
+
+func (b *MasterVolumeBuilder) addVSphereVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, subnet *kops.ClusterSubnetSpec, etcd *kops.EtcdClusterSpec, m *kops.EtcdMemberSpec, allMembers []string) {
+	fmt.Print("addVSphereVolume to be implemented")
 }

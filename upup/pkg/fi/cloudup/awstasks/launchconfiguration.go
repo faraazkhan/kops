@@ -34,7 +34,8 @@ import (
 
 //go:generate fitask -type=LaunchConfiguration
 type LaunchConfiguration struct {
-	Name *string
+	Name      *string
+	Lifecycle *fi.Lifecycle
 
 	UserData *fi.ResourceHolder
 
@@ -49,11 +50,18 @@ type LaunchConfiguration struct {
 	RootVolumeSize *int64
 	// RootVolumeType is the type of the EBS root volume to use (e.g. gp2)
 	RootVolumeType *string
+	// If volume type is io1, then we need to specify the number of Iops.
+	RootVolumeIops *int64
+	// RootVolumeOptimization enables EBS optimization for an instance
+	RootVolumeOptimization *bool
 
 	// SpotPrice is set to the spot-price bid if this is a spot pricing request
 	SpotPrice string
 
 	ID *string
+
+	// Tenancy. Can be either default or dedicated.
+	Tenancy *string
 }
 
 var _ fi.CompareWithID = &LaunchConfiguration{}
@@ -80,6 +88,9 @@ func (e *LaunchConfiguration) Find(c *fi.Context) (*LaunchConfiguration, error) 
 		}
 		return true
 	})
+	if err != nil {
+		return nil, fmt.Errorf("error listing AutoscalingLaunchConfigurations: %v", err)
+	}
 
 	if len(configurations) == 0 {
 		return nil, nil
@@ -108,6 +119,7 @@ func (e *LaunchConfiguration) Find(c *fi.Context) (*LaunchConfiguration, error) 
 		AssociatePublicIP:  lc.AssociatePublicIpAddress,
 		IAMInstanceProfile: &IAMInstanceProfile{Name: lc.IamInstanceProfile},
 		SpotPrice:          aws.StringValue(lc.SpotPrice),
+		Tenancy:            lc.PlacementTenancy,
 	}
 
 	securityGroups := []*SecurityGroup{}
@@ -126,6 +138,7 @@ func (e *LaunchConfiguration) Find(c *fi.Context) (*LaunchConfiguration, error) 
 		}
 		actual.RootVolumeSize = b.Ebs.VolumeSize
 		actual.RootVolumeType = b.Ebs.VolumeType
+		actual.RootVolumeIops = b.Ebs.Iops
 	}
 
 	userData, err := base64.StdEncoding.DecodeString(*lc.UserData)
@@ -146,6 +159,9 @@ func (e *LaunchConfiguration) Find(c *fi.Context) (*LaunchConfiguration, error) 
 			actual.ImageID = e.ImageID
 		}
 	}
+
+	// Avoid spurious changes
+	actual.Lifecycle = e.Lifecycle
 
 	if e.ID == nil {
 		e.ID = actual.ID
@@ -188,6 +204,7 @@ func (e *LaunchConfiguration) buildRootDevice(cloud awsup.AWSCloud) (map[string]
 		EbsDeleteOnTermination: aws.Bool(true),
 		EbsVolumeSize:          e.RootVolumeSize,
 		EbsVolumeType:          e.RootVolumeType,
+		EbsVolumeIops:          e.RootVolumeIops,
 	}
 
 	blockDeviceMappings[rootDeviceName] = rootDeviceMapping
@@ -239,9 +256,14 @@ func (_ *LaunchConfiguration) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *La
 	request.LaunchConfigurationName = &launchConfigurationName
 	request.ImageId = image.ImageId
 	request.InstanceType = e.InstanceType
+	request.EbsOptimized = e.RootVolumeOptimization
 
 	if e.SSHKey != nil {
 		request.KeyName = e.SSHKey.Name
+	}
+
+	if e.Tenancy != nil {
+		request.PlacementTenancy = e.Tenancy
 	}
 
 	securityGroupIDs := []*string{}
@@ -305,6 +327,7 @@ func (_ *LaunchConfiguration) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *La
 				if attempt > maxAttempts {
 					return fmt.Errorf("IAM instance profile not yet created/propagated (original error: %v)", message)
 				}
+				glog.V(4).Infof("got an error indicating that the IAM instance profile %q is not ready: %q", fi.StringValue(e.IAMInstanceProfile.Name), message)
 				glog.Infof("waiting for IAM instance profile %q to be ready", fi.StringValue(e.IAMInstanceProfile.Name))
 				time.Sleep(10 * time.Second)
 				continue
@@ -329,9 +352,11 @@ type terraformLaunchConfiguration struct {
 	AssociatePublicIpAddress *bool                   `json:"associate_public_ip_address,omitempty"`
 	UserData                 *terraform.Literal      `json:"user_data,omitempty"`
 	RootBlockDevice          *terraformBlockDevice   `json:"root_block_device,omitempty"`
+	EBSOptimized             *bool                   `json:"ebs_optimized,omitempty"`
 	EphemeralBlockDevice     []*terraformBlockDevice `json:"ephemeral_block_device,omitempty"`
 	Lifecycle                *terraform.Lifecycle    `json:"lifecycle,omitempty"`
 	SpotPrice                *string                 `json:"spot_price,omitempty"`
+	PlacementTenancy         *string                 `json:"placement_tenancy,omitempty"`
 }
 
 type terraformBlockDevice struct {
@@ -370,11 +395,17 @@ func (_ *LaunchConfiguration) RenderTerraform(t *terraform.TerraformTarget, a, e
 		tf.KeyName = e.SSHKey.TerraformLink()
 	}
 
+	if e.Tenancy != nil {
+		tf.PlacementTenancy = e.Tenancy
+	}
+
 	for _, sg := range e.SecurityGroups {
 		tf.SecurityGroups = append(tf.SecurityGroups, sg.TerraformLink())
 	}
 
 	tf.AssociatePublicIpAddress = e.AssociatePublicIP
+
+	tf.EBSOptimized = e.RootVolumeOptimization
 
 	{
 		rootDevices, err := e.buildRootDevice(cloud)
@@ -436,6 +467,7 @@ func (e *LaunchConfiguration) TerraformLink() *terraform.Literal {
 type cloudformationLaunchConfiguration struct {
 	AssociatePublicIpAddress *bool                        `json:"AssociatePublicIpAddress,omitempty"`
 	BlockDeviceMappings      []*cloudformationBlockDevice `json:"BlockDeviceMappings,omitempty"`
+	EBSOptimized             *bool                        `json:"EbsOptimized,omitempty"`
 	IAMInstanceProfile       *cloudformation.Literal      `json:"IamInstanceProfile,omitempty"`
 	ImageID                  *string                      `json:"ImageId,omitempty"`
 	InstanceType             *string                      `json:"InstanceType,omitempty"`
@@ -443,6 +475,7 @@ type cloudformationLaunchConfiguration struct {
 	SecurityGroups           []*cloudformation.Literal    `json:"SecurityGroups,omitempty"`
 	SpotPrice                *string                      `json:"SpotPrice,omitempty"`
 	UserData                 *string                      `json:"UserData,omitempty"`
+	PlacementTenancy         *string                      `json:"PlacementTenancy,omitempty"`
 
 	//NamePrefix               *string                 `json:"name_prefix,omitempty"`
 	//Lifecycle                *cloudformation.Lifecycle    `json:"lifecycle,omitempty"`
@@ -491,10 +524,16 @@ func (_ *LaunchConfiguration) RenderCloudformation(t *cloudformation.Cloudformat
 		cf.KeyName = e.SSHKey.Name
 	}
 
+	if e.Tenancy != nil {
+		cf.PlacementTenancy = e.Tenancy
+	}
+
 	for _, sg := range e.SecurityGroups {
 		cf.SecurityGroups = append(cf.SecurityGroups, sg.CloudformationLink())
 	}
 	cf.AssociatePublicIpAddress = e.AssociatePublicIP
+
+	cf.EBSOptimized = e.RootVolumeOptimization
 
 	{
 		rootDevices, err := e.buildRootDevice(cloud)

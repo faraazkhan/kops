@@ -26,7 +26,10 @@ import (
 	"github.com/golang/glog"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
+	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/apis/kops/validation"
+	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/upup/models"
@@ -50,6 +53,9 @@ type populateClusterSpec struct {
 
 	// fullCluster holds the built completed cluster spec
 	fullCluster *api.Cluster
+
+	// assetBuilder holds the AssetBuilder, used to store assets we discover / remap
+	assetBuilder *assets.AssetBuilder
 }
 
 func findModelStore() (vfs.Path, error) {
@@ -59,7 +65,7 @@ func findModelStore() (vfs.Path, error) {
 
 // PopulateClusterSpec takes a user-specified cluster spec, and computes the full specification that should be set on the cluster.
 // We do this so that we don't need any real "brains" on the node side.
-func PopulateClusterSpec(cluster *api.Cluster) (*api.Cluster, error) {
+func PopulateClusterSpec(cluster *api.Cluster, assetBuilder *assets.AssetBuilder) (*api.Cluster, error) {
 	modelStore, err := findModelStore()
 	if err != nil {
 		return nil, err
@@ -69,6 +75,7 @@ func PopulateClusterSpec(cluster *api.Cluster) (*api.Cluster, error) {
 		InputCluster: cluster,
 		ModelStore:   modelStore,
 		Models:       []string{"config"},
+		assetBuilder: assetBuilder,
 	}
 	err = c.run()
 	if err != nil {
@@ -223,16 +230,22 @@ func (c *populateClusterSpec) run() error {
 		return err
 	}
 
-	if cluster.Spec.DNSZone == "" {
+	if cluster.Spec.DNSZone == "" && !dns.IsGossipHostname(cluster.ObjectMeta.Name) {
 		dns, err := cloud.DNS()
 		if err != nil {
 			return err
 		}
 
-		dnsZone, err := FindDNSHostedZone(dns, cluster.ObjectMeta.Name)
+		dnsType := api.DNSTypePublic
+		if cluster.Spec.Topology != nil && cluster.Spec.Topology.DNS != nil && cluster.Spec.Topology.DNS.Type != "" {
+			dnsType = cluster.Spec.Topology.DNS.Type
+		}
+
+		dnsZone, err := FindDNSHostedZone(dns, cluster.ObjectMeta.Name, dnsType)
 		if err != nil {
 			return fmt.Errorf("error determining default DNS zone: %v", err)
 		}
+
 		glog.V(2).Infof("Defaulting DNS zone to: %s", dnsZone)
 		cluster.Spec.DNSZone = dnsZone
 	}
@@ -256,9 +269,20 @@ func (c *populateClusterSpec) run() error {
 
 	tf.AddTo(templateFunctions)
 
-	optionsContext := &components.OptionsContext{
-		ClusterName: cluster.ObjectMeta.Name,
+	if cluster.Spec.KubernetesVersion == "" {
+		return fmt.Errorf("KubernetesVersion is required")
 	}
+	sv, err := util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
+	if err != nil {
+		return fmt.Errorf("unable to determine kubernetes version from %q", cluster.Spec.KubernetesVersion)
+	}
+
+	optionsContext := &components.OptionsContext{
+		ClusterName:       cluster.ObjectMeta.Name,
+		KubernetesVersion: *sv,
+		AssetBuilder:      c.assetBuilder,
+	}
+
 	var fileModels []string
 	var codeModels []loader.OptionsBuilder
 	for _, m := range c.Models {
@@ -266,13 +290,14 @@ func (c *populateClusterSpec) run() error {
 		case "config":
 			// Note: DefaultOptionsBuilder comes first
 			codeModels = append(codeModels, &components.DefaultsOptionsBuilder{Context: optionsContext})
-
-			codeModels = append(codeModels, &components.KubeAPIServerOptionsBuilder{Context: optionsContext})
+			codeModels = append(codeModels, &components.KubeAPIServerOptionsBuilder{OptionsContext: optionsContext})
 			codeModels = append(codeModels, &components.DockerOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.NetworkingOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeDnsOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeletOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeControllerManagerOptionsBuilder{Context: optionsContext})
+			codeModels = append(codeModels, &components.KubeSchedulerOptionsBuilder{OptionsContext: optionsContext})
+			codeModels = append(codeModels, &components.KubeProxyOptionsBuilder{Context: optionsContext})
 			fileModels = append(fileModels, m)
 
 		default:

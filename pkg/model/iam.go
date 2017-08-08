@@ -19,6 +19,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/golang/glog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/upup/pkg/fi"
@@ -31,6 +32,8 @@ import (
 // IAMModelBuilder configures IAM objects
 type IAMModelBuilder struct {
 	*KopsModelContext
+
+	Lifecycle *fi.Lifecycle
 }
 
 var _ fi.ModelBuilder = &IAMModelBuilder{}
@@ -73,22 +76,42 @@ func (b *IAMModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			}
 
 			iamRole = &awstasks.IAMRole{
-				Name:               s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
+
 				RolePolicyDocument: fi.WrapResource(rolePolicy),
+				ExportWithID:       s(strings.ToLower(string(role)) + "s"),
 			}
 			c.AddTask(iamRole)
 
 		}
 
-		policy, err := b.buildAWSIAMPolicy(role)
-		if err != nil {
-			return err
-		}
 		{
+			iamPolicy := &iam.IAMPolicyResource{
+				Builder: &iam.IAMPolicyBuilder{
+					Cluster: b.Cluster,
+					Role:    role,
+					Region:  b.Region,
+				},
+			}
+
+			// This is slightly tricky; we need to know the hosted zone id,
+			// but we might be creating the hosted zone dynamically.
+
+			// TODO: I don't love this technique for finding the task by name & modifying it
+			dnsZoneTask, found := c.Tasks["DNSZone/"+b.NameForDNSZone()]
+			if found {
+				iamPolicy.DNSZone = dnsZoneTask.(*awstasks.DNSZone)
+			} else {
+				glog.V(2).Infof("Task %q not found; won't set route53 permissions in IAM", "DNSZone/"+b.NameForDNSZone())
+			}
+
 			t := &awstasks.IAMRolePolicy{
-				Name:           s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
+
 				Role:           iamRole,
-				PolicyDocument: fi.WrapResource(fi.NewStringResource(policy)),
+				PolicyDocument: iamPolicy,
 			}
 			c.AddTask(t)
 		}
@@ -96,14 +119,16 @@ func (b *IAMModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		var iamInstanceProfile *awstasks.IAMInstanceProfile
 		{
 			iamInstanceProfile = &awstasks.IAMInstanceProfile{
-				Name: s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
 			}
 			c.AddTask(iamInstanceProfile)
 		}
 
 		{
 			iamInstanceProfileRole := &awstasks.IAMInstanceProfileRole{
-				Name: s(name),
+				Name:      s(name),
+				Lifecycle: b.Lifecycle,
 
 				InstanceProfile: iamInstanceProfile,
 				Role:            iamRole,
@@ -124,7 +149,9 @@ func (b *IAMModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			additionalPolicyName := "additional." + name
 
 			t := &awstasks.IAMRolePolicy{
-				Name: s(additionalPolicyName),
+				Name:      s(additionalPolicyName),
+				Lifecycle: b.Lifecycle,
+
 				Role: iamRole,
 			}
 
@@ -152,26 +179,6 @@ func (b *IAMModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	}
 
 	return nil
-}
-
-// buildAWSIAMPolicy produces the AWS IAM policy for the given role
-func (b *IAMModelBuilder) buildAWSIAMPolicy(role kops.InstanceGroupRole) (string, error) {
-	pb := &iam.IAMPolicyBuilder{
-		Cluster:      b.Cluster,
-		Role:         role,
-		Region:       b.Region,
-		HostedZoneID: b.HostedZoneID,
-	}
-
-	policy, err := pb.BuildAWSIAMPolicy()
-	if err != nil {
-		return "", fmt.Errorf("error building IAM policy: %v", err)
-	}
-	json, err := policy.AsJSON()
-	if err != nil {
-		return "", fmt.Errorf("error building IAM policy: %v", err)
-	}
-	return json, nil
 }
 
 // buildAWSIAMRolePolicy produces the AWS IAM role policy for the given role
